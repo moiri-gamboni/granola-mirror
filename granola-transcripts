@@ -1,0 +1,198 @@
+#!/usr/bin/env python3
+"""granola-transcripts — add verbatim transcripts to the Granola mirror via the OAuth MCP.
+
+Transcripts are NOT exposed by the public API key, only by Granola's MCP. This tool
+uses an OAuth token in ~/.config/granola/ (auto-refreshed) to fetch each meeting's
+transcript and append a '## Transcript' section to its mirror .md file.
+
+  granola-transcripts sync DIR [--force]   enrich every *.md that lacks a transcript
+  granola-transcripts get <uuid>           print one transcript to stdout
+
+A plain `granola sync` (API-key summaries) overwrites the .md and drops the
+transcript, so the refresh order is:  granola sync DIR  &&  granola-transcripts sync DIR
+When the refresh token finally expires this prints how to re-auth.
+"""
+import sys, os, json, re, time, glob, base64, argparse
+import urllib.request, urllib.parse, urllib.error
+
+CFG = os.path.expanduser("~/.config/granola")
+TOKENS, CLIENT = f"{CFG}/mcp-tokens.json", f"{CFG}/mcp-client.json"
+MCP, PROTO = "https://mcp.granola.ai/mcp", "2025-06-18"
+UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+MARK = "\n## Transcript\n"
+UPDATED_RE = re.compile(r"granola updated_at: (\S+)")
+# Stamped under '## Transcript' at fetch time: records which note version the
+# transcript was fetched against, so a fetch that landed while the note was still
+# changing (mid-meeting, summary still generating) is refetched once the note
+# settles. Transcripts fetched before this marker existed carry none and are
+# grandfathered — never refetched (the historical set is known-good and a blanket
+# refetch would blow the MCP rate budget).
+TMARK_RE = re.compile(r"<!-- transcript for updated_at: (\S+) -->")
+# The settle signal is summary presence: Granola generates the AI summary when the
+# meeting ends (its note.generated webhook fires on exactly that), so a mirror file
+# still carrying granola's no-summary placeholder is a live or just-started meeting
+# whose transcript would be partial — and a partial fetched now would stick.
+NO_SUMMARY = "_(no summary)_"
+
+# Granola returns a transcript as ONE run-on string, with turns delimited by two spaces
+# before '<Speaker>: '. Split one turn per line: readable, and gives git meaningful
+# line-level diffs instead of a single ~80k-char line. Requiring the colon keeps ordinary
+# sentences (". And so...") from being split.
+_SPEAKER = r"[A-ZÀ-Ý][A-Za-zÀ-ÿ0-9'’.\-]*(?: [A-ZÀ-Ý][A-Za-zÀ-ÿ0-9'’.\-]*){0,3}"
+TURN_RE = re.compile(r"[ \t]{2,}(?=" + _SPEAKER + r": )")
+
+
+def split_turns(t):
+    return TURN_RE.sub("\n", (t or "").strip())
+
+
+def _jwt_exp(at):
+    try:
+        p = at.split(".")[1]; p += "=" * (-len(p) % 4)
+        return json.loads(base64.urlsafe_b64decode(p)).get("exp", 0)
+    except Exception:
+        return 0
+
+
+def token():
+    t = json.load(open(TOKENS))
+    if time.time() < _jwt_exp(t["access_token"]) - 120:
+        return t["access_token"]
+    c = json.load(open(CLIENT))
+    data = urllib.parse.urlencode({
+        "grant_type": "refresh_token", "refresh_token": t["refresh_token"],
+        "client_id": c["client_id"], "resource": c["res"]}).encode()
+    req = urllib.request.Request(c["as"] + "/oauth2/token", data=data,
+                                 headers={"Content-Type": "application/x-www-form-urlencoded"})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            new = json.load(r)
+    except urllib.error.HTTPError as e:
+        print(f"granola-transcripts: token refresh failed ({e.code}); re-auth needed. {e.read().decode()[:200]}", file=sys.stderr)
+        sys.exit(3)                             # exit 3 = OAuth expired (granola-refresh ntfys on this)
+    if "access_token" not in new:
+        print(f"granola-transcripts: refresh returned no token: {new}", file=sys.stderr)
+        sys.exit(3)
+    merged = {**t, **new}
+    json.dump(merged, open(TOKENS, "w")); os.chmod(TOKENS, 0o600)
+    return merged["access_token"]
+
+
+_sid, _inited = [None], [False]
+
+
+def _mcp(body, tok):
+    h = {"Authorization": "Bearer " + tok, "Content-Type": "application/json",
+         "Accept": "application/json, text/event-stream", "MCP-Protocol-Version": PROTO}
+    if _sid[0]:
+        h["Mcp-Session-Id"] = _sid[0]
+    req = urllib.request.Request(MCP, data=json.dumps(body).encode(), headers=h, method="POST")
+    with urllib.request.urlopen(req, timeout=120) as r:
+        if r.headers.get("Mcp-Session-Id"):
+            _sid[0] = r.headers["Mcp-Session-Id"]
+        ctype, raw = r.headers.get("Content-Type", ""), r.read().decode()
+    if "text/event-stream" in ctype:
+        for line in raw.splitlines():
+            if line.startswith("data:"):
+                d = line[5:].strip()
+                if d:
+                    try:
+                        m = json.loads(d)
+                        if isinstance(m, dict) and ("result" in m or "error" in m):
+                            return m
+                    except json.JSONDecodeError:
+                        pass
+        return None
+    return json.loads(raw) if raw.strip() else None
+
+
+BAD = re.compile(r"rate limit|slow down|too many request", re.I)
+
+
+def transcript(uuid, tok):
+    if not _inited[0]:
+        _mcp({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+              "params": {"protocolVersion": PROTO, "capabilities": {},
+                         "clientInfo": {"name": "granola-transcripts", "version": "1"}}}, tok)
+        _mcp({"jsonrpc": "2.0", "method": "notifications/initialized"}, tok)
+        _inited[0] = True
+    for attempt in range(10):
+        res = _mcp({"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+                    "params": {"name": "get_meeting_transcript", "arguments": {"meeting_id": uuid}}}, tok)
+        if not res or "error" in res:
+            return None
+        txt = "".join(c.get("text", "") for c in res.get("result", {}).get("content", []) if c.get("type") == "text")
+        if res.get("result", {}).get("isError") or BAD.search(txt):
+            time.sleep(min(90, 15 * (attempt + 1)))   # patient backoff — bucket refills slowly
+            continue
+        try:
+            return json.loads(txt).get("transcript") or None
+        except Exception:
+            return txt or None
+    return None                                # still rate-limited after retries
+
+
+def cmd_sync(a):
+    tok = None
+    files = sorted(glob.glob(os.path.join(a.dir, "*.md")))
+    done = skip = empty = settling = 0
+    for f in files:
+        body = open(f).read()
+        mu = UPDATED_RE.search(body)
+        updated = mu.group(1) if mu else ""
+        if MARK in body and not a.force:
+            existing = body.split(MARK, 1)[1]
+            if existing.strip() and not BAD.search(existing):
+                tm = TMARK_RE.search(existing)
+                if tm is None or tm.group(1) == updated:
+                    skip += 1; continue       # real transcript, current (or grandfathered)
+                # marker != note version: fetched against an older note — refetch
+        m = UUID_RE.search(body)
+        if not m:
+            continue
+        if NO_SUMMARY in body.split(MARK)[0] and not a.force:
+            settling += 1; continue           # meeting not over — fetch once summarized
+        if tok is None:
+            tok = token()
+        t = transcript(m.group(0), tok)
+        base = body.split(MARK)[0].rstrip()
+        if t and not BAD.search(t):
+            open(f, "w").write(base + "\n" + MARK + "\n"
+                               + f"<!-- transcript for updated_at: {updated} -->\n\n"
+                               + split_turns(t) + "\n")
+            done += 1
+        else:
+            empty += 1
+        time.sleep(4)
+    print(f"granola-transcripts: {done} enriched, {skip} already good, {settling} settling, "
+          f"{empty} unavailable/failed ({len(files)} files)")
+
+
+def cmd_get(a):
+    print(transcript(a.uuid, token()) or "(no transcript)")
+
+
+def cmd_reformat(a):
+    """Re-split already-fetched transcripts one turn per line. Local only — no MCP
+    calls, so it doesn't touch the transcript rate limit."""
+    files = sorted(glob.glob(os.path.join(a.dir, "*.md")))
+    n = 0
+    for f in files:
+        body = open(f).read()
+        if MARK not in body:
+            continue
+        head, _, tail = body.partition(MARK)
+        new = split_turns(tail)
+        if new != tail.strip():
+            open(f, "w").write(head.rstrip() + "\n" + MARK + "\n" + new + "\n")
+            n += 1
+    print(f"granola-transcripts: reformatted {n} transcript(s) ({len(files)} files)")
+
+
+p = argparse.ArgumentParser(prog="granola-transcripts")
+sub = p.add_subparsers(dest="cmd", required=True)
+ps = sub.add_parser("sync"); ps.add_argument("dir"); ps.add_argument("--force", action="store_true"); ps.set_defaults(fn=cmd_sync)
+pg = sub.add_parser("get"); pg.add_argument("uuid"); pg.set_defaults(fn=cmd_get)
+pr = sub.add_parser("reformat"); pr.add_argument("dir"); pr.set_defaults(fn=cmd_reformat)
+args = p.parse_args()
+args.fn(args)
