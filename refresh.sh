@@ -23,8 +23,8 @@
 # refresh.sh owns ALL push alarms (so a manual notes.sh never pages): a notes step that
 # never started (no run summary), a run where every attempted generation failed (carrying
 # the first error verbatim), a single meeting wedged while others succeed, a held
-# (unverifiable-banner) note, a failed digest, and the lock timeout. Plus the pre-existing
-# MCP OAuth-expiry ntfy.
+# (unverifiable-banner) note, a failed digest, the lock timeout, and the MCP OAuth expiry
+# (granola-transcripts exit 3).
 #
 #   refresh.sh [--commit] [--digest] <mirror-dir>        (or set GRANOLA_MIRROR)
 set -uo pipefail

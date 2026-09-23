@@ -7,9 +7,9 @@ to https://<hooks host>/granola, which a public tunnel or reverse proxy routes t
 127.0.0.1:8097. Payloads carry no content — just note_id — so a verified event
 simply kicks refresh.sh (pull → transcripts → note → commit) for the whole mirror,
 debounced: a pending marker plus a single-flight runner coalesce event bursts into
-one run. refresh.sh now self-locks the whole pipeline (~/.locks/granola-pipeline), so
-the runner no longer wraps it in a caller-side flock; its own single-flight lock just
-coalesces bursts. The hourly cron stays as the fallback sweep for missed deliveries.
+one run. refresh.sh takes the pipeline lock itself (~/.locks/granola-pipeline); the
+runner's own single-flight lock only coalesces bursts. The hourly cron stays as the
+fallback sweep for missed deliveries.
 
 Hardening: the server is threaded with a per-request timeout (a slow client can't wedge
 delivery), an oversized or non-numeric Content-Length is refused before the body is read,
@@ -78,8 +78,8 @@ HANDLED = {"note.generated", "note.edited", "note.access_granted", "note.regener
 
 # Coalesce a burst of events into one pipeline run: the marker records "work arrived", the
 # runner lock keeps a single consumer, and the while-loop re-runs if more events landed
-# during a run. refresh.sh self-locks the whole pipeline, so this no longer wraps it in a
-# caller-side flock. REFRESH and MIRROR arrive as "$1"/"$2" (argv), never interpolated, so a
+# during a run. refresh.sh takes the pipeline lock itself, so this adds none around it.
+# REFRESH and MIRROR arrive as "$1"/"$2" (argv), never interpolated, so a
 # hostile mirror path cannot break out of the shell string; only the HOME-derived constants
 # below are interpolated.
 RUNNER = f"""

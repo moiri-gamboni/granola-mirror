@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """migrate-banners.py — one-time stamp migration for the version-addressed note model.
 
-Run once on the live box after the version-model notes.sh lands. Two local loops, no MCP:
+Run once on a deployment whose auto notes predate the banner's version fields. Two local loops, no MCP:
 
   Loop A (hash-stamp): rewrite each existing auto note's banner to carry the version
     fields the model reads — `source-updated-at:` (the mirror's current `granola updated_at`)
