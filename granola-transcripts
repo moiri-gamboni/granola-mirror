@@ -5,12 +5,16 @@ Transcripts are NOT exposed by the public API key, only by Granola's MCP. This t
 uses an OAuth token in ~/.config/granola/ (auto-refreshed) to fetch each meeting's
 transcript and append a '## Transcript' section to its mirror .md file.
 
-  granola-transcripts sync DIR [--force]   enrich every *.md that lacks a transcript
+  granola-transcripts sync DIR [--force]   enrich every *.md that lacks a current transcript
   granola-transcripts get <uuid>           print one transcript to stdout
+  granola-transcripts reformat DIR         re-split fetched transcripts one turn per line
+                                           (local, no MCP calls)
 
-A plain `granola sync` (API-key summaries) overwrites the .md and drops the
-transcript, so the refresh order is:  granola sync DIR  &&  granola-transcripts sync DIR
-When the refresh token finally expires this prints how to re-auth.
+`granola sync` rewrites a changed note's header and summary but keeps its transcript
+section, so the refresh order is:  granola sync DIR  &&  granola-transcripts sync DIR
+(refresh.sh runs both).
+Exit 3 means the OAuth refresh token has expired and a browser re-authorization is
+needed (outside this tool).
 """
 import sys, os, json, re, time, glob, base64, argparse
 import urllib.request, urllib.parse, urllib.error
@@ -189,7 +193,8 @@ def cmd_reformat(a):
     print(f"granola-transcripts: reformatted {n} transcript(s) ({len(files)} files)")
 
 
-p = argparse.ArgumentParser(prog="granola-transcripts")
+p = argparse.ArgumentParser(prog="granola-transcripts", description=__doc__,
+                            formatter_class=argparse.RawDescriptionHelpFormatter)
 sub = p.add_subparsers(dest="cmd", required=True)
 ps = sub.add_parser("sync"); ps.add_argument("dir"); ps.add_argument("--force", action="store_true"); ps.set_defaults(fn=cmd_sync)
 pg = sub.add_parser("get"); pg.add_argument("uuid"); pg.set_defaults(fn=cmd_get)

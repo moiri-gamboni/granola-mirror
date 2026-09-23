@@ -8,8 +8,11 @@ you, and (with the Public scope) workspace / team-space notes.
   granola folders                          list folders (id + name)
   granola notes [--folder ID] [--limit N]  list notes (newest first)
   granola get <note-id> [--transcript]     print one note as markdown
-  granola sync DIR [--folder ID] [--since YYYY-MM-DD] [--transcript]
-                                           mirror notes -> one markdown file each
+  granola sync DIR [--folder ID] [--since YYYY-MM-DD] [--force] [--changed-file PATH]
+                                           mirror notes -> one markdown file each; skips
+                                           notes whose updated_at is unchanged (--force
+                                           rewrites them), keeps any '## Transcript'
+                                           section, writes the changed paths to PATH
 """
 import sys, os, json, re, time, argparse, urllib.request, urllib.parse, urllib.error
 
@@ -140,7 +143,8 @@ def cmd_sync(a):
     print(f"granola: {written} written, {skipped} unchanged -> {a.dir}")
 
 
-p = argparse.ArgumentParser(prog="granola", description="Read Granola notes via the public API.")
+p = argparse.ArgumentParser(prog="granola", description=__doc__,
+                            formatter_class=argparse.RawDescriptionHelpFormatter)
 sub = p.add_subparsers(dest="cmd", required=True)
 sub.add_parser("folders").set_defaults(fn=cmd_folders)
 pn = sub.add_parser("notes"); pn.add_argument("--folder"); pn.add_argument("--limit", type=int, default=30); pn.set_defaults(fn=cmd_notes)
