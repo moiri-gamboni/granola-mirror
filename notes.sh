@@ -146,13 +146,12 @@ wedge_clear() { rm -f "$WEDGE_DIR/$1.json"; }
 held_mark()   { : > "$HELD_PREFIX$1"; }
 held_clear()  { rm -f "$HELD_PREFIX$1"; }
 
-PROMPT="The meeting-note-extraction procedure is included below and is the spec for how to read this transcript — follow it in full: extraction priorities, nuance-preservation rules, reliability conventions, privacy (never paste a secret's value), what to drop, and scaling the note to the meeting's consequence (a standup gets a TL;DR + action items, not the full skeleton). Apply both transcript-corrections glossaries, also included: the reviewed tier may be applied silently; the auto tier per its own header (never silently — keep the original garble visible and flag reliance).
+# The skill's 'Without a chat' section carries the unattended deviations (chat items go to
+# Sources & reliability; no glossary rows, since the digest proposes them for the same
+# meetings); the prompt restates the rules most often under-applied and adds the output contract.
+PROMPT="The meeting-note procedure is included below and is the spec for this transcript: follow it in full — extraction priorities, nuance-preservation rules, transcript reliability, privacy (never paste a secret's value), what to drop, and scaling the note to the meeting's consequence (a standup gets a TL;DR + action items, not the full skeleton). This is an unattended run, so its 'Without a chat' section applies. Also included: both transcript-corrections glossaries, then the meeting (Granola's header and AI summary, then the verbatim transcript).
 
-This is an unattended run (a cron), so it deviates from the procedure in exactly these ways:
-- Output ONLY the note file body, in markdown, starting directly at the '# <Meeting title> — <YYYY-MM-DD>' heading. No preamble, no meta-commentary, no code fence around the note: your entire output is written verbatim to the note file.
-- The procedure's 'surface judgment calls and open items to the human in chat' step has no chat here: put those judgment calls, each with a High/Med/Low confidence, in the note's 'Sources & reliability' section instead.
-- Do not edit any file and do not propose glossary rows — the daily digest already proposes glossary additions for these same meetings. Unresolved garbles belong in 'Sources & reliability'.
-- The meeting arrives as Granola's header + AI summary followed by the verbatim transcript. The summary is an UNRELIABLE hint — lossy and sometimes wrong; the transcript is the source of truth, so the note's claims must be supported by the transcript (header metadata like date/attendees may be used, remembering the procedure's caveat that invite-derived attendee lists overcount actual joiners)."
+Output ONLY the note body, in markdown, starting directly at the '# <Meeting title> — <YYYY-MM-DD>' heading. No preamble, no meta-commentary, no code fence around the note: your entire output is written verbatim to the note file."
 
 candidates=()
 if [ ${#FILES[@]} -gt 0 ]; then
