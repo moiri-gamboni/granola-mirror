@@ -1,83 +1,148 @@
 # granola-mirror
 
-Keeps a local markdown mirror of the Granola meeting notes shared with the owner, and derives artifacts from it: a structured meeting note per transcript, and, where the private digest tool is installed, a daily phone brief. The code lives in this repository; the data stays in the workspace the tools are pointed at.
+Keeps a local markdown copy of your Granola meeting notes, with their verbatim transcripts, in a git workspace, and writes a structured note for each meeting unattended: decisions, action items, open questions and the context a later reader needs, extracted by Claude Code from the transcript. The same extraction procedure ships as a Claude Code skill, `/granola-mirror:meetings`, for writing or revising a note in a session. The code lives here; the mirror and the notes live in the workspace you point it at.
 
-## How to set up
+Requirements: Python 3 (standard library only), bash, `flock`, git, and a logged-in [Claude Code](https://docs.claude.com/en/docs/claude-code) CLI (`claude`) for the notes. Transcripts need Granola's MCP OAuth access; the webhook trigger needs Granola webhooks (Business plan).
 
-1. Clone this repository.
-2. Put a Granola public-API key (`grn_…`) at `~/.config/granola/api-key`, mode 0600. Neither this repository nor its scripts issue or obtain the key; get one from Granola's own account settings and documentation (https://docs.granola.ai). `granola sync <mirror-dir>` then populates the mirror with summaries.
-3. Optional, for verbatim transcripts: `granola-transcripts` reads an OAuth access/refresh token pair from `~/.config/granola/mcp-tokens.json` and the matching client record (`client_id`, `as`, `res`) from `~/.config/granola/mcp-client.json`, and refreshes the token automatically as it expires. Nothing in this repository performs the initial OAuth authorization that produces those two files, or the browser re-auth `granola-transcripts` asks for (exit code 3) once a refresh token itself has expired; both files must already exist, obtained per Granola's own documentation (https://docs.granola.ai). Once they exist, `granola-transcripts sync <mirror-dir>` enriches the mirror.
-4. Optional, for the webhook trigger: register the endpoint with the one-time call documented in `webhook_receiver.py`'s module docstring (`curl -X POST https://public-api.granola.ai/v1/webhook-endpoints ...`); Granola's response is the only place it discloses the signing secret, which you save to `~/.config/granola/webhook-secret` (0600). Then run `webhook_receiver.py` with `GRANOLA_MIRROR` set, behind a tunnel or reverse proxy that exposes its `/granola` path publicly.
-5. Optional, for the unattended pipeline: schedule `refresh.sh [--commit] [--digest] <mirror-dir>` (see Ops below); the Claude Code skill (`/granola-mirror:meetings`, see "Tools" below) installs through the plugin.
+## Set up
 
-## Data layout (all in the workspace, never in this repo)
+1. Clone this repository. The scripts find their siblings through symlinks, so you may link them onto your PATH (for example `~/bin/granola-refresh -> refresh.sh`).
+2. Put a Granola public-API key (`grn_…`, from Granola's account settings, https://docs.granola.ai) at `~/.config/granola/api-key`, mode 0600.
+3. Pick a mirror directory inside the workspace repository, for example `<workspace>/meetings/granola`, and write it to `~/.config/granola/env`:
 
-- the mirror dir (wherever the tools are pointed, e.g. `<workspace>/meetings/granola/`) — one `.md` per meeting, `YYYY-MM-DD-<slug>-<note-id>.md`, holding the Granola header + AI summary and, once fetched, a `## Transcript` section (verbatim, one turn per line, stamped with the note version it was fetched against).
-- `<workspace>/meetings/notes/<basename>.note.md` — the auto-extracted meeting notes, alongside the session-written ones (same procedure — the meetings skill — attended vs not). Provenance is the generator banner on line 1 and the granola basename (`…-not_<id>.note.md`); each note's judgment calls are flagged in its *Sources & reliability* section, since no human saw them in chat.
-- `<workspace>/workflows/meetings/transcript-corrections.md` and `…-auto.md` — the two garble-correction glossaries `notes.sh` reads on every run (reviewed tier, applied silently, and an unreviewed auto tier appended by the daily digest); data this repository's pipeline reads and writes into, not part of the skill itself.
-- `<workspace>/updates/granola/<date>.md` — the daily digest archive (written by the private `granola-digest`, not by anything here).
+   ```sh
+   GRANOLA_MIRROR=/path/to/workspace/meetings/granola
+   ```
 
-`<workspace>` is the git toplevel of the mirror dir, falling back to the mirror dir's parent when the mirror is not in a git repo. The tools take the mirror dir as an argument or read it from the configuration described below; nothing here resolves a workspace on its own.
+   Then `granola sync <mirror-dir>` fills it with one file per meeting (header and AI summary).
+4. For transcripts, provide `~/.config/granola/mcp-tokens.json` (`access_token`, `refresh_token`) and `~/.config/granola/mcp-client.json` (`client_id`, `as` = authorization-server URL, `res` = resource), obtained through Granola's MCP OAuth flow. Nothing here performs that authorization; `granola-transcripts` refreshes the token from then on, and exits 3 when the refresh token itself has expired and you need to authorize again. `granola-transcripts sync <mirror-dir>` adds the transcripts.
+5. Schedule the pipeline, for example in an `/etc/cron.d` file (drop the user field in a personal crontab). `claude` must be on the scheduler's PATH (cron's and systemd's defaults usually lack `~/.local/bin`), or every note generation fails:
 
-## Tools
+   ```cron
+   PATH=/home/you/.local/bin:/usr/local/bin:/usr/bin:/bin
+   7 * * * *  you  /path/to/granola-mirror/refresh.sh --commit           2>&1 | logger -t granola-refresh
+   30 6 * * * you  /path/to/granola-mirror/refresh.sh --commit --digest  2>&1 | logger -t granola-refresh
+   ```
 
-- **`granola`** — CLI over Granola's official public API (`grn_` key at `~/.config/granola/api-key`, 0600). `folders` / `notes` / `get` / `sync`. `sync` is incremental (skips notes whose `updated_at` is unchanged), preserves any `## Transcript` section added by `granola-transcripts`, and writes the changed-file list the pipeline consumes. Rate-limited to ~4.5 req/s under Granola's 5 req/s cap.
-- **`granola-transcripts`** — adds verbatim transcripts via Granola's **OAuth MCP** (the public API returns summaries only, never transcripts). Token in `~/.config/granola/mcp-*.json`, refreshed lazily (only when there is something to fetch); exits **3** when the refresh token has expired and a one-time browser re-auth is needed. The MCP transcript endpoint is a slow-refill token bucket, so it backs off, retries, and only fetches what's needed. Two freshness rules make the event-driven cadence safe: a **settle guard** skips notes still carrying granola's no-summary placeholder (Granola generates the summary at meeting end, so a summary-less note is a live meeting whose transcript would be partial), and each fetched transcript is stamped with the note version (`updated_at`) it was fetched against, so one that landed against an older note version is refetched once the note settles — pre-marker transcripts are grandfathered, never refetched. `reformat` re-splits already-fetched transcripts locally (no MCP calls).
-- **`refresh.sh [--commit] [--digest] <mirror-dir>`** — the pipeline: summaries → transcripts → optionally `granola-digest` → `notes.sh`. Each run appends its changed-note list to `~/.local/state/granola-digest-pending.txt`; a `--digest` run (once daily) feeds that accumulated list to the private `granola-digest` (found via PATH; a clone without it just skips) and clears it only on success, so frequent ticks can't starve the brief of coverage. `--commit` pathspec-commits the mirror, the day's brief, the auto notes (scoped to `meetings/notes/*-not_*.note.md`, so a half-drafted session note is never swept into a cron commit) and the auto glossary tier, each in whichever repo it actually lives, without touching anything else staged.
-  - **One internal lock**: refresh.sh acquires a single blocking `flock` on `~/.locks/granola-pipeline` and holds it across the whole run, so no two runs (cron tick, webhook kick, manual) ever interleave a fetch with a note write. It exports `GRANOLA_LOCK_HELD=1` so the `notes.sh` it calls doesn't re-acquire; a *standalone* `notes.sh` takes the same lock non-blocking and refuses (rather than stalling up to 3h) when a pipeline is running.
-  - **refresh.sh owns every push alarm** (so a manual `notes.sh` never pages): a run where every *attempted* generation failed — carrying the first error verbatim, which names `claude`-not-on-PATH / OAuth-expiry / rate-cap — with a zero-attempt guard so an all-held or no-candidate run stays silent; a single meeting *wedged* (≥3 consecutive failures) but only when another meeting succeeded that run (an env-class outage pages once at the run level, not per meeting); a *held* note whose banner can't be verified; a failed *digest*; a notes step that *did not run* (`notes.sh` exited before writing its run summary: the skill file or the mirror directory missing); and a *lock timeout* (only a genuine 3h wait). Plus the pre-existing MCP OAuth-expiry ntfy (3-day cooldown). Each alarm fires once per arming and re-arms when the condition clears.
-- **`notes.sh DIR [FILE...] [--since YYYY-MM-DD] [--force]`** — the auto-notes step. For each mirror file that has a transcript, feeds a **tool-less** headless `claude -p` (sonnet-5, xhigh effort, 1h timeout; `--tools "" --strict-mcp-config` so untrusted transcript content can reach no built-in or MCP tool) the `skills/meetings/SKILL.md` procedure from this repository, both transcript-corrections glossaries from `<workspace>/workflows/meetings/`, and the full meeting file; writes the model's output as the note. The unattended deviations live in the skill's *Without a chat* section, which the prompt points to: judgment calls land in the note's *Sources & reliability* section instead of chat, and no glossary rows are proposed (the digest already proposes them for the same meetings — two proposers would duplicate rows). The prompt itself adds only the output contract (the note body, nothing else).
-  - **Version-addressed, not mtime**: the note's banner records the source version it was generated from (`source-updated-at:`, the mirror's `granola updated_at`) and a hash of its own body (`body-sha256:`). A run compares those recorded values: banner version equal *and* body hash intact → **current** (skip); version moved on → **regenerate**; body hash ≠ banner hash → a **hand edit**, held and *not* clobbered (a run counter, not a page — the person made it deliberately); banner absent or unparseable → **held** and paged (a note that can't be verified at all). Any parse failure resolves to *held*, never to a silent overwrite.
-  - **`--force`** is the sole sanctioned override of a hold — it regenerates the note and clears the hold/wedge markers. It is the way to overwrite a hand edit on purpose.
-  - **Coherence**: a transcript is stamped with the note version it was fetched against; if that stamp is older than the mirror header (a summary/transcript pair that don't match), notes.sh does **not** generate — it never fabricates a note from a mismatched pair. Transcripts fetched before that stamp existed carry none and are treated as coherent (see grandfathering below).
-  - **Settle guard**: the meeting must be over (a real summary present, not granola's no-summary placeholder) before a model call is spent. The check reads only the header, so a speaker quoting the placeholder inside the transcript can't freeze a note. Explicit `FILE` args bypass it.
-  - **`--since` floor**: the stored first-run date at `~/.local/state/granola-notes-since` excludes the pre-existing mirror backlog; backfilling history is a deliberate `notes.sh <dir> --since 2026-03-01`. Explicit `FILE` args process just those files (testing, manual reprocess), bypassing the floor and the settle/coherence gates but **still honoring a hold** — naming a hand-edited note's mirror file does not clobber it; only `--force` does.
-  - `notes.sh --hash <notefile>` prints the sha256 of a note's body (banner + blank line stripped) — the single body-hash implementation, also called by `migrate-banners.py`.
+   The hourly line picks up new meetings; the daily `--digest` line additionally runs an optional digest command (see [Adding a digest](#adding-a-digest)). The runs serialize on one lock, so the lines need no `flock` of their own.
+6. Optional, so a note lands minutes after a meeting ends instead of at the next hourly run: register a webhook endpoint once.
 
-- **`migrate-banners.py MIRROR_DIR [--floor YYYY-MM-DD]`** — a one-time, local (no-MCP) migration run once after the version-model `notes.sh` lands. It hash-stamps the existing auto notes (so a hand-corrected note survives and no existing note trips the banner-unparseable hold on the first version-model run) and marker-stamps at-or-above-floor grandfathered transcripts (leaving the historical below-floor set marker-free so a Granola mass re-summarization can't queue a refetch storm). The hash comes from `notes.sh --hash`, never a reimplementation.
+   ```sh
+   curl -X POST https://public-api.granola.ai/v1/webhook-endpoints \
+     -H "Authorization: Bearer $(cat ~/.config/granola/api-key)" \
+     -H "Content-Type: application/json" \
+     -d '{"url": "https://<your hooks host>/granola", "scopes": ["personal", "public"]}'
+   ```
 
-- **`skills/meetings/SKILL.md`** — the transcript-to-note procedure `notes.sh` feeds the model; the same file is the `meetings` skill of the `granola-mirror` Claude Code plugin this repository declares in `.claude-plugin/`, invoked as `/granola-mirror:meetings` for attended extraction in a session.
+   The response is the only place Granola shows the signing secret: save it (`whsec_…`) to `~/.config/granola/webhook-secret`, mode 0600, and keep the response for the record of the registered URL. Run `webhook_receiver.py` as a service (it listens on `127.0.0.1:8097`), with `claude` on its PATH, and route the public `/granola` path to it through a tunnel or reverse proxy. `GET /granola` answers `granola-webhook ok`, which checks the route. The receiver refuses to start without the secret or without a `GRANOLA_MIRROR` that is an existing directory.
+7. Optional, for the skill in interactive sessions:
 
-- **`webhook_receiver.py`** — the primary trigger. Granola's webhooks (Business plan: `note.generated`, `note.edited`, `note.access_granted`, `note.regenerated`; Standard Webhooks HMAC) hit `https://<hooks host>/granola`, routed by a public tunnel or reverse proxy to this listener on `127.0.0.1:8097` (run as a systemd unit on the host). A verified event kicks `refresh.sh --commit` — debounced by a pending marker + single-flight runner; refresh.sh self-locks the pipeline now, so the runner no longer wraps it in a caller-side flock — so a meeting's note lands minutes after Granola generates its summary (`note.generated` *is* the settle signal; the payload carries no content, so the pipeline just runs). Every verified event is logged to `~/.local/state/granola-webhook-events.jsonl` — the cheap "is the webhook alive?" query (tail it; a recent line means deliveries are arriving). The listener is threaded with a per-request timeout, refuses an oversized or non-numeric `Content-Length` before reading, requires `GRANOLA_MIRROR` (no default — it refuses to start unset or on a missing directory, since a kicked pipeline would otherwise materialize an empty mirror at the wrong path), and hands the mirror path to the runner as argv rather than an interpolated shell string. The signing secret (`~/.config/granola/webhook-secret`, 0600) is returned only by the one-time endpoint registration (see the module docstring); the service refuses to start without it.
+   ```sh
+   claude plugin marketplace add /path/to/granola-mirror
+   claude plugin install granola-mirror@granola-mirror
+   ```
 
-**Grandfathering (a standing property, not a one-off).** A transcript fetched before its mirror file carried a version marker cannot be checked for coherence, so it is treated as coherent and never refetched. This is permanent for the historical below-floor set: it is a property of those files, not the result of a migration that "completed".
+8. Optional, for failure alerts: run an [ntfy](https://ntfy.sh) server on `localhost:2586`. `refresh.sh` posts to topic `claude-<user>`, with a bearer token from `~/services/.ntfy-token` if that file exists. Without a server the alerts are dropped silently; the log still has them.
 
-## Configuration
+## What ends up in the workspace
 
-Every per-user value lives under `~/.config/granola/`; nothing in this repository embeds a deployment-specific path or a secret.
+The workspace is the git toplevel of the mirror directory, or the mirror directory's parent when it is not in a repository.
+
+- **The mirror** (`$GRANOLA_MIRROR`): one `YYYY-MM-DD-<slug>-<note-id>.md` per meeting, holding Granola's header (with a `granola updated_at` version line), its AI summary, and a `## Transcript` section, one speaker turn per line, stamped with the meeting version it was fetched against.
+- **`meetings/notes/<mirror-basename>.note.md`**: the generated notes. Line 1 is a generator banner. Notes you write by hand can sit in the same directory; `--commit` only commits generated ones (`*-not_*.note.md`, after Granola's `not_` note ids).
+- **`workflows/meetings/transcript-corrections.md`** and **`transcript-corrections-auto.md`**: optional glossaries of transcription errors (garbled names and terms and their correct forms), human-reviewed and unreviewed. Every note generation reads whichever exist; see the skill for how each tier is applied.
+- **`updates/granola/`**: where a digest command writes its output, if you add one.
+
+## How notes are kept in step with meetings
+
+Each run looks at every mirrored meeting dated on or after the notes floor (the date `notes.sh` first ran, stored in `~/.local/state/granola-notes-since`). It spends a model call only when the meeting has ended (Granola has written a real summary, not its `_(no summary)_` placeholder), has a transcript, and the transcript was fetched against the meeting's current version. A transcript fetched mid-meeting would be partial, so a meeting still in progress waits, and a transcript that predates the latest edit waits for `granola-transcripts` to fetch it again. A transcript with no version stamp counts as current and is never fetched again.
+
+The note's banner records the meeting version it was generated from (`source-updated-at:`) and a hash of the note's body (`body-sha256:`). On each run:
+
+| The note | What happens |
+|---|---|
+| matches its banner, meeting unchanged | skipped |
+| matches its banner, meeting changed since | regenerated |
+| body no longer matches its hash (someone edited it) | kept as edited, counted in the run summary, no alert |
+| banner missing or unreadable | kept, and alerted as a held note |
+
+Short of `--force`, nothing is overwritten unless the pipeline can show it wrote the current text itself.
+
+The model runs as `claude -p --model claude-sonnet-5 --effort xhigh` (one-hour limit) with no tools at all (`--tools "" --strict-mcp-config`), because the transcript is untrusted input. It is given `skills/meetings/SKILL.md` from this clone, both glossaries and the meeting file, and its output becomes the note. The skill's *Without a chat* section is what an unattended run follows: judgment calls go into the note's *Sources & reliability* section instead of a conversation. Editing the skill changes both the unattended notes and the interactive skill.
+
+To work with the notes:
+
+- **Correct a note**: edit it and leave line 1 in place. The pipeline keeps your version from then on.
+- **Discard your edits, or regenerate one meeting**: `notes.sh <mirror-dir> <mirror-file> --force`.
+- **Note one meeting now**: `notes.sh <mirror-dir> <mirror-file>`. Naming files skips the floor, the ended check and the current-transcript check; a note that is current or hand-edited is still left alone.
+- **Note meetings from before the first run**: `notes.sh <mirror-dir> --since 2026-03-01`.
+
+A `notes.sh` run by hand while the pipeline is running exits with code 75 instead of waiting; run it again when the pipeline is done.
+
+## Monitoring
+
+Every trigger logs under one tag, `journalctl -t granola-refresh`, as long as the cron lines pipe to `logger` as above (the webhook runner does). `~/.local/state/granola-webhook-events.jsonl` gets one line per verified webhook delivery, so a recent line means deliveries are arriving. When a generation fails, the model's output and error are kept under `~/.local/state/granola-rejects/` for 180 days; the log line names the file and which check failed.
+
+`refresh.sh` sends each alert once per occurrence: again only after the condition has cleared and returned, except where the table says it repeats. A `notes.sh` run by hand never alerts.
+
+| Alert | Meaning | What to do |
+|---|---|---|
+| Granola MCP re-auth needed | the transcript OAuth refresh token expired; summaries still update | authorize again to rewrite `mcp-tokens.json` (repeats every 3 days until fixed) |
+| every generation failed | every note attempted this run failed; the alert carries the first error | usually `claude` is not on PATH, its login expired, or its usage limit is reached |
+| note wedged | one meeting failed 3 or more runs in a row while others succeeded | read its files in `granola-rejects/` (repeats daily while stuck) |
+| note held | a note's banner is missing or unreadable | restore the banner, or `notes.sh <mirror-dir> <mirror-file> --force` |
+| notes did not run | `notes.sh` stopped before processing anything: the skill file or the mirror directory is missing | check the clone and `GRANOLA_MIRROR` |
+| digest failed | the digest command exited non-zero; its pending list is kept for the next run | see the digest's own log |
+| pipeline lock timeout | a run waited `GRANOLA_LOCK_WAIT` seconds (default 3 hours) for the lock | a run is stuck or the machine is overloaded |
+
+## Adding a digest
+
+`refresh.sh --digest` runs `granola-digest <mirror-dir> <pending-file>` if a command of that name is on PATH, and skips the step otherwise; no digest command ships with this repository. The pending file lists every mirror file that changed since the last successful digest, one path per line, and is emptied when the command exits 0. It runs before the notes step. A digest that writes its output under `<workspace>/updates/granola/` and appends glossary proposals to the auto tier gets both committed by `--commit`.
+
+## Reference
+
+### Commands
+
+`granola` and `granola-transcripts` print their full usage with `--help`; `notes.sh` and `refresh.sh` carry it in their header comments.
+
+- **`granola folders | notes | get <id> | sync DIR`**: Granola's public API (summaries only; transcripts are not available through it). `sync` rewrites only meetings whose `updated_at` changed, keeps their transcript sections, and stays under Granola's 5 requests per second limit.
+- **`granola-transcripts sync DIR | get <uuid> | reformat DIR`**: transcripts through Granola's MCP. `sync` fetches only missing or outdated transcripts and backs off when Granola rate-limits it; `reformat` re-splits fetched transcripts locally. Exit 3: the OAuth refresh token expired.
+- **`refresh.sh [--commit] [--digest] [mirror-dir]`**: the pipeline: summaries, transcripts, the digest (with `--digest`), notes, then (with `--commit`) a commit of the mirror, the generated notes, `updates/granola/` and the auto glossary tier (in whichever repository holds it), leaving anything else staged untouched. The mirror comes from the argument, then `GRANOLA_MIRROR`, then `~/.config/granola/env`.
+- **`notes.sh DIR [FILE...] [--since YYYY-MM-DD] [--force]`**: the notes step (see [How notes are kept in step with meetings](#how-notes-are-kept-in-step-with-meetings)). `notes.sh --hash NOTEFILE` prints a note's body hash.
+- **`webhook_receiver.py`**: verifies Granola's signed webhook events (`note.generated`, `note.edited`, `note.access_granted`, `note.regenerated`) and runs `refresh.sh --commit` for the whole mirror, coalescing bursts of events into one run.
+- **`migrate-banners.py MIRROR_DIR [--floor YYYY-MM-DD] [--dry-run]`**: a one-time upgrade for a deployment whose generated notes predate the version and hash fields in the banner. A new deployment never needs it.
+
+### Configuration
 
 | File | Read by | Contents |
 |---|---|---|
-| `~/.config/granola/env` | `refresh.sh`, `webhook_receiver.py` | `KEY=VALUE` lines, shell-sourceable; an `export ` prefix, `#` comments and quotes are tolerated. The one key read is `GRANOLA_MIRROR`. |
+| `~/.config/granola/env` | `refresh.sh`, `webhook_receiver.py` | shell-sourceable `KEY=VALUE` lines; the one key read is `GRANOLA_MIRROR` |
 | `~/.config/granola/api-key` | `granola` | the `grn_` public-API key, mode 0600 |
-| `~/.config/granola/mcp-tokens.json` | `granola-transcripts` | the MCP OAuth tokens (`access_token`, `refresh_token`); rewritten, mode 0600, on every refresh |
-| `~/.config/granola/mcp-client.json` | `granola-transcripts` | the OAuth client record: `client_id`, `as` (authorization-server URL), `res` (resource) |
-| `~/.config/granola/webhook-secret` | `webhook_receiver.py` | the Standard Webhooks signing secret (`whsec_…`), mode 0600; the receiver refuses to start without it |
-| `~/.config/granola/webhook-endpoint.json` | nothing here | the endpoint-registration response, kept as the record of the registered URL |
-| `~/services/.ntfy-token` | `refresh.sh` | optional bearer token for the local ntfy server (`http://localhost:2586`, topic `claude-<user>`); absent means unauthenticated posts |
+| `~/.config/granola/mcp-tokens.json` | `granola-transcripts` | MCP OAuth `access_token` and `refresh_token`; rewritten on every refresh |
+| `~/.config/granola/mcp-client.json` | `granola-transcripts` | OAuth client record: `client_id`, `as`, `res` |
+| `~/.config/granola/webhook-secret` | `webhook_receiver.py` | the webhook signing secret (`whsec_…`), mode 0600 |
+| `~/services/.ntfy-token` | `refresh.sh` | optional ntfy bearer token |
 
 | Variable | Read by | Meaning |
 |---|---|---|
-| `GRANOLA_MIRROR` | `refresh.sh`, `webhook_receiver.py` | the mirror directory. `refresh.sh` takes the positional argument first, then the environment, then `~/.config/granola/env`. The receiver reads the environment, then the env file, and refuses to start when the result is unset or not a directory. |
-| `GRANOLA_LOCK_WAIT` | `refresh.sh` | seconds to wait for the pipeline lock before paging a lock timeout; default `10800` |
-| `GRANOLA_LOCK_HELD` | `notes.sh` | set to `1` by `refresh.sh` for the `notes.sh` it runs: the pipeline lock is already held. A standalone `notes.sh` leaves it unset and takes the lock itself. |
+| `GRANOLA_MIRROR` | `refresh.sh`, `webhook_receiver.py` | the mirror directory, if not given as an argument; the receiver reads the environment, then the env file |
+| `GRANOLA_LOCK_WAIT` | `refresh.sh` | seconds to wait for the pipeline lock before alerting; default `10800` |
+| `GRANOLA_LOCK_HELD` | `notes.sh` | set to `1` by `refresh.sh` for the `notes.sh` it runs, which then skips taking the lock itself |
 
-State the tools write, under `~/.local/state/` unless noted:
+### State
+
+Under `~/.local/state/` unless noted:
 
 | Path | Written by | Role |
 |---|---|---|
-| `granola-changed.txt` | `granola sync` (via `refresh.sh`) | the last tick's changed-note list |
-| `granola-digest-pending.txt` | `refresh.sh` | changed notes accumulated for the next `--digest` run; cleared on a successful digest |
-| `granola-notes-since` | `notes.sh` | the first-run floor date |
-| `granola-notes-run.json` | `notes.sh` | the run summary `refresh.sh` reads for its alarms |
-| `granola-note-wedge/<basename>.json` | `notes.sh` | per-meeting consecutive-failure ledger |
-| `granola-note-held-<basename>` | `notes.sh` | marker for a note held on an unverifiable banner |
-| `granola-rejects/` | `notes.sh` | rejected model output, 180-day retention |
-| `granola-alert-*`, `granola-wedge-alerted-*`, `granola-held-alerted-*`, `granola-oauth-alerted` | `refresh.sh` | alarm arming state |
-| `granola-webhook-pending`, `granola-webhook-events.jsonl` | `webhook_receiver.py` | the debounce marker and the log of verified events |
-| `~/.locks/granola-pipeline` | `refresh.sh`, `notes.sh` | the one pipeline lock |
-| `~/.locks/granola-webhook-runner` | `webhook_receiver.py` | the runner's single-flight lock |
-
-## Ops
-
-The webhook is the primary trigger; two cron lines back it up — hourly, `refresh.sh --commit` as the fallback sweep for missed deliveries; daily the same plus `--digest` for the phone brief. All three trigger sources serialize on the one `~/.locks/granola-pipeline` lock inside refresh.sh, so nothing overlaps (a queued tick becomes a no-op under the version model, so the cron lines need no `flock -n` of their own). Log: `journalctl -t granola-refresh` — the webhook runner pipes through `logger -t granola-refresh`; give the cron lines the same pipe so one tag covers every trigger. Rejected model output from failed note/digest generations is kept as files under `~/.local/state/granola-rejects/` (which check tripped is in the log line; 180-day retention, pruned by notes.sh) — files rather than journal entries because you read a reject whole and journald's size-bound retention doesn't guarantee 180 days. Credentials are per-user files under `~/.config/granola/`; nothing in this repo embeds a secret. `refresh.sh`'s failure notifications are an inlined `curl` to a local ntfy server (`localhost:2586`, token at `~/services/.ntfy-token`), `|| true`-shaped — on a box without that server it degrades to silence, not failure.
+| `granola-changed.txt` | `granola sync` | the last run's changed meetings |
+| `granola-digest-pending.txt` | `refresh.sh` | changed meetings since the last successful digest |
+| `granola-notes-since` | `notes.sh` | the notes floor date |
+| `granola-notes-run.json` | `notes.sh` | the run summary `refresh.sh` alerts from |
+| `granola-note-wedge/<basename>.json` | `notes.sh` | a meeting's consecutive-failure count |
+| `granola-note-held-<basename>` | `notes.sh` | marks a note held for an unreadable banner |
+| `granola-rejects/` | `notes.sh` | failed model output, 180 days |
+| `granola-alert-*`, `granola-wedge-alerted-*`, `granola-held-alerted-*`, `granola-oauth-alerted` | `refresh.sh` | which alerts have been sent |
+| `granola-webhook-pending`, `granola-webhook-events.jsonl` | `webhook_receiver.py` | events awaiting a run; the log of verified events |
+| `~/.locks/granola-pipeline` | `refresh.sh`, `notes.sh` | the pipeline lock |
+| `~/.locks/granola-webhook-runner` | `webhook_receiver.py` | keeps one webhook-triggered run at a time |
