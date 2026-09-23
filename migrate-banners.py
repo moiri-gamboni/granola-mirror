@@ -123,6 +123,13 @@ def loop_b(mirror, floor, dry):
     return c
 
 
+def workspace(mirror):
+    """The mirror's git toplevel, else its parent directory: the same root notes.sh uses."""
+    r = subprocess.run(("git", "-C", mirror, "rev-parse", "--show-toplevel"),
+                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    return r.stdout.strip() if r.returncode == 0 else os.path.dirname(mirror)
+
+
 def resolve_floor(arg):
     if arg:
         return arg
@@ -143,7 +150,7 @@ def main(argv):
     a = ap.parse_args(argv)
 
     mirror = os.path.abspath(a.mirror)
-    notes_dir = a.notes_dir or os.path.join(os.path.dirname(mirror), "meetings", "notes")
+    notes_dir = a.notes_dir or os.path.join(workspace(mirror), "meetings", "notes")
 
     stamped, already, skipped = loop_a(mirror, notes_dir, a.notes_sh, a.dry_run)
     print("migrate-banners: loop A — %d stamped, %d already, %d skipped" % (stamped, already, skipped))

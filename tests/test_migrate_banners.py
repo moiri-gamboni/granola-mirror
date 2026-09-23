@@ -59,6 +59,22 @@ class Migration(GranolaSandbox):
         self.assertEqual(self.read(self.note_path(name)), first, "second run must not restamp")
         self.assertIn("already", r.stdout)
 
+    def test_loop_a_finds_notes_at_the_workspace_root_of_a_nested_mirror(self):
+        """The notes dir is <workspace>/meetings/notes, the workspace being the mirror's git
+        toplevel (as notes.sh resolves it), not the mirror's parent directory."""
+        ws = os.path.join(self.tmp, "repo")
+        self.mirror = os.path.join(ws, "meetings", "granola")
+        self.notes = os.path.join(ws, "meetings", "notes")
+        os.makedirs(self.mirror)
+        os.makedirs(self.notes)
+        subprocess.run(("git", "init", "-q", ws), check=True)
+        name = "2026-08-19-standup-not_aaa.md"
+        self.mirror_file(name)
+        self.write_note(name, banner=self.OLD_BANNER % name, body="# S\n\nBody.\n")
+        r = self.migrate("--floor", "2000-01-01")
+        self.assertIn("1 stamped", r.stdout)
+        self.assertIn("body-sha256:", self.read(self.note_path(name)).splitlines()[0])
+
     # --- Loop B -----------------------------------------------------------
     def test_loop_b_stamps_an_at_floor_grandfathered_transcript(self):
         name = "2026-08-19-standup-not_aaa.md"
