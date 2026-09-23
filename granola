@@ -7,7 +7,7 @@ you, and (with the Public scope) workspace / team-space notes.
 
   granola folders                          list folders (id + name)
   granola notes [--folder ID] [--limit N]  list notes (newest first)
-  granola get <note-id> [--transcript]     print one note as markdown
+  granola get <note-id>                    print one note as markdown
   granola sync DIR [--folder ID] [--since YYYY-MM-DD] [--force] [--changed-file PATH]
                                            mirror notes -> one markdown file each; skips
                                            notes whose updated_at is unchanged (--force
@@ -108,7 +108,7 @@ def cmd_notes(a):
 
 
 def cmd_get(a):
-    note = api(f"/notes/{a.id}", include_transcript="true" if a.transcript else None)
+    note = api(f"/notes/{a.id}")
     sys.stdout.write(note_markdown(note))
 
 
@@ -148,7 +148,7 @@ p = argparse.ArgumentParser(prog="granola", description=__doc__,
 sub = p.add_subparsers(dest="cmd", required=True)
 sub.add_parser("folders").set_defaults(fn=cmd_folders)
 pn = sub.add_parser("notes"); pn.add_argument("--folder"); pn.add_argument("--limit", type=int, default=30); pn.set_defaults(fn=cmd_notes)
-pg = sub.add_parser("get"); pg.add_argument("id"); pg.add_argument("--transcript", action="store_true"); pg.set_defaults(fn=cmd_get)
+pg = sub.add_parser("get"); pg.add_argument("id"); pg.set_defaults(fn=cmd_get)
 ps = sub.add_parser("sync"); ps.add_argument("dir"); ps.add_argument("--folder"); ps.add_argument("--since"); ps.add_argument("--force", action="store_true"); ps.add_argument("--changed-file"); ps.set_defaults(fn=cmd_sync)
 args = p.parse_args()
 args.fn(args)
