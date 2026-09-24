@@ -7,7 +7,7 @@ description: Use when turning a meeting transcript (Granola, Otter, a hand-recor
 
 A note has two readers: the workspace's owner and future LLM sessions that load it as context. Where the two diverge, write for the model; the human still gets a better note.
 
-Paths are relative to the workspace, the git toplevel of the meetings mirror. The corrections glossaries are `workflows/meetings/transcript-corrections.md` (human-reviewed) and `workflows/meetings/transcript-corrections-auto.md` (unreviewed proposals, appended by the daily digest).
+Paths are relative to the workspace, the git toplevel of the meetings mirror. The corrections glossaries are `workflows/meetings/transcript-corrections.md` (human-reviewed) and `workflows/meetings/transcript-corrections-auto.md` (unreviewed proposals, appended by `notes.sh` with each unattended note).
 
 ## Core principles
 

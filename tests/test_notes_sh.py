@@ -189,6 +189,85 @@ class WedgeLedger(GranolaSandbox):
         self.assertIn("OAuth expired", s["first_error"])
 
 
+class GlossaryProposals(GranolaSandbox):
+    """Each generated note carries its meeting's glossary proposals after a marker line;
+    notes.sh strips them from the note and appends them to the auto tier."""
+    NAME = "2026-08-19-standup-not_aaa.md"
+
+    def auto_tier(self):
+        path = os.path.join(self.wf, "transcript-corrections-auto.md")
+        with open(path, "w") as f:
+            f.write("# auto tier\n")
+        return path
+
+    def test_proposals_are_appended_to_the_auto_tier_and_kept_out_of_the_note(self):
+        auto = self.auto_tier()
+        row = "- Alice (ops lead) | garble seen: \"Alyss\" | High | 2026-08-19 standup"
+        self.mirror_file(self.NAME)
+        r = self.notes_sh(self.mirror, *LOW, CLAUDE_STUB_GLOSSARY=row)
+        self.assertEqual(r.returncode, 0, r.stdout)
+        tier = self.read(auto)
+        self.assertRegex(tier, r"\n## \d{4}-\d{2}-\d{2} — 2026-08-19-standup-not_aaa\n")
+        self.assertIn(row, tier)
+        note = self.read(self.note_path(self.NAME))
+        self.assertIn("Body paragraph.", note)
+        self.assertNotIn("glossary-additions", note)
+        self.assertNotIn("Alyss", note)
+        # The stored body hash covers the note without its tail, so it reads back current.
+        self.notes_sh(self.mirror, *LOW)
+        self.assertEqual(self.run_summary()["current"], 1)
+
+    def test_none_appends_nothing(self):
+        auto = self.auto_tier()
+        self.mirror_file(self.NAME)
+        self.notes_sh(self.mirror, *LOW)
+        self.assertEqual(self.read(auto), "# auto tier\n")
+
+    def test_none_variants_append_nothing(self):
+        auto = self.auto_tier()
+        self.mirror_file(self.NAME)
+        self.notes_sh(self.mirror, *LOW, CLAUDE_STUB_GLOSSARY="- none\n**None**\nnone ")
+        self.assertEqual(self.read(auto), "# auto tier\n")
+
+    def test_a_heading_after_the_marker_fails_the_generation(self):
+        """Note content placed after the marker would otherwise leave the note and land
+        in the auto tier with nothing alarming."""
+        auto = self.auto_tier()
+        self.mirror_file(self.NAME)
+        tail = "- a | b | High | m\n\n## Sources & reliability\n- Open: who is Alyss? (Low)"
+        r = self.notes_sh(self.mirror, *LOW, CLAUDE_STUB_GLOSSARY=tail)
+        self.assertNotEqual(r.returncode, 0, r.stdout)
+        self.assertFalse(os.path.exists(self.note_path(self.NAME)))
+        self.assertEqual(self.read(auto), "# auto tier\n")
+        self.assertIn("heading", self.run_summary()["first_error"])
+
+    def test_two_markers_fail_the_generation(self):
+        self.auto_tier()
+        self.mirror_file(self.NAME)
+        r = self.notes_sh(self.mirror, *LOW,
+                          CLAUDE_STUB_GLOSSARY="none\n<!-- glossary-additions -->\nnone")
+        self.assertNotEqual(r.returncode, 0, r.stdout)
+        self.assertFalse(os.path.exists(self.note_path(self.NAME)))
+
+    def test_an_unwritable_auto_tier_fails_loudly(self):
+        auto = self.auto_tier()
+        os.chmod(auto, 0o444)
+        self.addCleanup(os.chmod, auto, 0o644)
+        self.mirror_file(self.NAME)
+        r = self.notes_sh(self.mirror, *LOW, CLAUDE_STUB_GLOSSARY="- a | b | High | m")
+        self.assertNotEqual(r.returncode, 0, r.stdout)
+        self.assertNotIn("appended", r.stdout)
+        self.assertIn("glossary", self.run_summary()["first_error"])
+
+    def test_a_missing_marker_fails_the_generation(self):
+        self.auto_tier()
+        self.mirror_file(self.NAME)
+        r = self.notes_sh(self.mirror, *LOW, CLAUDE_STUB_MODE="nomarker")
+        self.assertNotEqual(r.returncode, 0, r.stdout)
+        self.assertFalse(os.path.exists(self.note_path(self.NAME)))
+        self.assertEqual(self.run_summary()["failed"], 1)
+
+
 class ToolDenial(GranolaSandbox):
     def test_the_generation_call_runs_tool_less(self):
         """The claude -p transform must carry BOTH --tools "" and --strict-mcp-config: the

@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # refresh.sh — keep a Granola notes mirror current, then derive what's new from it.
 #   1. incremental summaries (public API key)   2. transcripts (OAuth MCP, missing only)
-#   3. with --digest: granola-digest, if installed — an optional phone brief from a separate
+#   3. with --digest: granola-digest, if one is on PATH — an optional brief from a separate
 #      tool, over everything accumulated since the last brief
 #   4. notes.sh — a structured meeting note per transcript, via the meetings skill
 # The fetch steps are idempotent and only touch new/changed notes, so a frequent cadence
 # stays well under the MCP transcript rate limit: the cron runs this hourly so a note lands
-# shortly after its transcript does, and once daily with --digest. The webhook receiver is
+# shortly after its transcript does; a deployment with a digest command adds a daily
+# --digest run. The webhook receiver is
 # the primary trigger; the cron is the fallback sweep. Each run appends its changed-note
 # list to a pending file the digest consumes and clears, so frequent ticks don't starve the
 # daily brief of coverage.
@@ -84,8 +85,8 @@ alert_once() {
 }
 disarm() { rm -f "$STATE/granola-alert-$1"; }
 
-# Commit just the mirror + today's brief + the auto meeting notes + the auto glossary
-# tier (the file granola-digest appends its garble proposals to). Pathspec commits, so
+# Commit just the mirror + any digest output under updates/granola/ + the auto meeting notes
+# + the auto glossary tier (the file notes.sh appends each note's glossary proposals to). Pathspec commits, so
 # anything else already staged is left untouched. In a polyrepo layout workflows/ can be
 # its own repo — the auto tier is committed in whichever repo it actually lives.
 commit_mirror() {
@@ -237,8 +238,8 @@ pipeline() {
     echo "[$(date -Is)]   transcript step failed (rc=$rc)."
   fi
 
-  # Optional personal digest (deployed from the private repo); daily (--digest) only,
-  # and before the notes step so the phone brief isn't delayed behind long note runs.
+  # Optional digest command, if one is on PATH; daily (--digest) only, and before the
+  # notes step so its brief isn't delayed behind long note runs.
   if [ "$DIGEST" -eq 1 ] && command -v granola-digest >/dev/null; then
     echo "[$(date -Is)] granola-refresh: digest"
     if granola-digest "$DIR" "$PENDING"; then

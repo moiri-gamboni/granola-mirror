@@ -93,7 +93,7 @@ if [ -z "${GRANOLA_LOCK_HELD:-}" ]; then
 fi
 
 # The procedure is load-bearing: a missing skill file silently degrades every note,
-# so fail loudly instead of skipping (same stance as granola-digest).
+# so fail loudly instead of skipping.
 PROC="$SELF_DIR/skills/meetings/SKILL.md"
 [ -f "$PROC" ] || { echo "notes.sh: meeting procedure missing at $PROC" >&2; exit 1; }
 WF="$BASE/workflows/meetings"
@@ -147,11 +147,15 @@ held_mark()   { : > "$HELD_PREFIX$1"; }
 held_clear()  { rm -f "$HELD_PREFIX$1"; }
 
 # The skill's 'Without a chat' section carries the unattended deviations (chat items go to
-# Sources & reliability; no glossary rows, since the digest proposes them for the same
-# meetings); the prompt restates the rules most often under-applied and adds the output contract.
+# Sources & reliability); the prompt restates the rules most often under-applied, asks for
+# the meeting's glossary proposals, and adds the output contract. The proposals follow a
+# marker line and are split off before the note is hashed and published.
+GLOSSARY_MARKER="<!-- glossary-additions -->"
 PROMPT="The meeting-note procedure is included below and is the spec for this transcript: follow it in full — extraction priorities, nuance-preservation rules, transcript reliability, privacy (never paste a secret's value), what to drop, and scaling the note to the meeting's consequence (a standup gets a TL;DR + action items, not the full skeleton). This is an unattended run, so its 'Without a chat' section applies. Also included: both transcript-corrections glossaries, then the meeting (Granola's header and AI summary, then the verbatim transcript).
 
-Output ONLY the note body, in markdown, starting directly at the '# <Meeting title> — <YYYY-MM-DD>' heading. No preamble, no meta-commentary, no code fence around the note: your entire output is written verbatim to the note file."
+This prompt asks for glossary proposals. Propose rows ONLY for garbles in this meeting that neither glossary tier already covers, in the auto tier's row format: '- correct form (role/context) | garbles seen | High/Med/Low | source meeting'. New evidence that strengthens or contradicts an existing auto-tier row goes in Sources & reliability, not in a proposal.
+
+Output the note body in markdown, starting directly at the '# <Meeting title> — <YYYY-MM-DD>' heading. No preamble, no meta-commentary, no code fence around the note. After the note, output a line containing exactly $GLOSSARY_MARKER and then one proposal per line, or the single word none. Nothing after the proposals. Everything before the marker is written verbatim to the note file; everything after it is appended to the auto tier."
 
 candidates=()
 if [ ${#FILES[@]} -gt 0 ]; then
@@ -223,10 +227,17 @@ for f in "${candidates[@]}"; do
   # 128000 = sonnet-5's actual output cap; Claude Code's 64k default is half that, and a long
   # meeting at high effort exceeds it (thinking counts toward output tokens).
   rc=$?
-  if [ "$rc" -ne 0 ] || [ ! -s "$tmp" ] || [ "$(head -c1 "$tmp")" != "#" ]; then
+  # A heading after the marker is note content in the wrong place: splitting there would
+  # move it out of the note and into the auto tier with nothing alarming.
+  nmarkers=$(grep -cxF "$GLOSSARY_MARKER" "$tmp")
+  tailhdr=$(sed "1,/^$GLOSSARY_MARKER\$/d" "$tmp" | grep -c '^#')
+  if [ "$rc" -ne 0 ] || [ ! -s "$tmp" ] || [ "$(head -c1 "$tmp")" != "#" ] \
+     || [ "$nmarkers" -ne 1 ] || [ "$tailhdr" -ne 0 ]; then
     if [ "$rc" -ne 0 ]; then why="rc=$rc"
     elif [ ! -s "$tmp" ]; then why="empty output"
-    else why="output does not start with '#'"
+    elif [ "$(head -c1 "$tmp")" != "#" ]; then why="output does not start with '#'"
+    elif [ "$nmarkers" -ne 1 ]; then why="$nmarkers glossary-additions marker line(s), expected exactly 1"
+    else why="$tailhdr heading line(s) after the glossary-additions marker"
     fi
     keep="$REJECTS/$(date +%Y%m%dT%H%M%S)-$fbase"
     mv -f "$tmp" "$keep.out"; mv -f "$err" "$keep.err"
@@ -235,6 +246,14 @@ for f in "${candidates[@]}"; do
     wedge_bump "$fbase" "$src"
     failed=$((failed+1)); continue
   fi
+  # Split the glossary tail off: the note is everything before the marker (trailing blank
+  # lines dropped), the proposals everything after it minus blanks and a 'none' however
+  # decorated ('- none', '**None**').
+  rows=$(sed "1,/^$GLOSSARY_MARKER\$/d" "$tmp" \
+    | sed -e '/^[[:space:]]*$/d' -e '/^[[:space:]*-]*[Nn][Oo][Nn][Ee][.[:space:]*]*$/d')
+  body="$(mktemp "$STATE/granola-note-body.XXXXXX")"
+  sed "/^$GLOSSARY_MARKER\$/,\$d" "$tmp" | sed -e ':a' -e '/^\n*$/{$d;N;ba' -e '}' > "$body"
+  mv -f "$body" "$tmp"
   # Hash the body via the SAME implementation the reader uses: stage banner-shaped, hash.
   staged="$(mktemp "$STATE/granola-note-stg.XXXXXX")"
   { printf 'x\n\n'; cat "$tmp"; } > "$staged"
@@ -247,6 +266,24 @@ for f in "${candidates[@]}"; do
   { printf '%s\n\n' "$banner"; cat "$tmp"; } > "$npub"
   mv -f "$npub" "$note"
   rm -f "$tmp" "$err"
+  # Appended verbatim under a dated heading naming the meeting (no row parsing, so model
+  # format drift can't break the append). refresh.sh --commit commits it. A failed append
+  # counts as a failure: the note is already current, so these rows are never re-proposed.
+  if [ -n "$rows" ]; then
+    AUTO="$WF/transcript-corrections-auto.md"
+    if [ -f "$AUTO" ]; then
+      if { echo; echo "## $(date +%F) — $fbase"; echo; printf '%s\n' "$rows"; } >> "$AUTO"; then
+        echo "notes.sh: appended $(printf '%s\n' "$rows" | grep -c .) glossary proposal(s) to $AUTO"
+      else
+        why="could not append glossary proposals for $fbase to $AUTO"
+        echo "notes.sh: $why; rows: $rows" >&2
+        [ -z "$FIRST_ERR" ] && FIRST_ERR="$why"
+        failed=$((failed+1))
+      fi
+    else
+      echo "notes.sh: WARNING: $AUTO missing; proposals for $fbase dropped: $rows" >&2
+    fi
+  fi
   wedge_clear "$fbase"; held_clear "$fbase"   # a successful write resolves any prior hold/wedge
   written=$((written+1))
 done

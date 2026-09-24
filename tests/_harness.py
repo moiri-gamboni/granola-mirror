@@ -43,6 +43,10 @@ if printf '%s' "$input" | grep -q 'GRANOLA_FAIL_TOKEN'; then
   printf 'boom: this meeting is wedged\n' >&2; exit 1
 fi
 printf '# Meeting note\n\nBody paragraph.\n'
+# The glossary tail notes.sh asks for: `none` by default, CLAUDE_STUB_GLOSSARY's rows when
+# set, and no marker at all under CLAUDE_STUB_MODE=nomarker.
+[ "${CLAUDE_STUB_MODE:-ok}" = nomarker ] && exit 0
+printf '\n<!-- glossary-additions -->\n%s\n' "${CLAUDE_STUB_GLOSSARY:-none}"
 '''
 
 # Stubs for the network fetchers refresh.sh calls by SELF_DIR-relative path — copied into the

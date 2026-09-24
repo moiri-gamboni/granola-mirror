@@ -50,7 +50,7 @@ The workspace is the git toplevel of the mirror directory, or the mirror directo
 
 - **The mirror** (`$GRANOLA_MIRROR`): one `YYYY-MM-DD-<slug>-<note-id>.md` per meeting, holding Granola's header (with a `granola updated_at` version line), its AI summary, and a `## Transcript` section, one speaker turn per line, stamped with the meeting version it was fetched against.
 - **`meetings/notes/<mirror-basename>.note.md`**: the generated notes. Line 1 is a generator banner. Notes you write by hand can sit in the same directory; `--commit` only commits generated ones (`*-not_*.note.md`, after Granola's `not_` note ids).
-- **`workflows/meetings/transcript-corrections.md`** and **`transcript-corrections-auto.md`**: optional glossaries of transcription errors (garbled names and terms and their correct forms), human-reviewed and unreviewed. Every note generation reads whichever exist; see the skill for how each tier is applied.
+- **`workflows/meetings/transcript-corrections.md`** and **`transcript-corrections-auto.md`**: optional glossaries of transcription errors (garbled names and terms and their correct forms), human-reviewed and unreviewed. Every note generation reads whichever exist and appends its meeting's proposed new rows to the auto tier, if that file exists; see the skill for how each tier is applied.
 - **`updates/granola/`**: where a digest command writes its output, if you add one.
 
 ## How notes are kept in step with meetings
@@ -68,7 +68,7 @@ The note's banner records the meeting version it was generated from (`source-upd
 
 Short of `--force`, nothing is overwritten unless the pipeline can show it wrote the current text itself.
 
-The model runs as `claude -p --model claude-sonnet-5 --effort xhigh` (one-hour limit) with no tools at all (`--tools "" --strict-mcp-config`), because the transcript is untrusted input. It is given `skills/meetings/SKILL.md` from this clone, both glossaries and the meeting file, and its output becomes the note. The skill's *Without a chat* section is what an unattended run follows: judgment calls go into the note's *Sources & reliability* section instead of a conversation. Editing the skill changes both the unattended notes and the interactive skill.
+The model runs as `claude -p --model claude-sonnet-5 --effort xhigh` (one-hour limit) with no tools at all (`--tools "" --strict-mcp-config`), because the transcript is untrusted input. It is given `skills/meetings/SKILL.md` from this clone, both glossaries and the meeting file. Its output is the note, then a `<!-- glossary-additions -->` line and the proposed glossary rows, which are appended to the auto tier under a heading naming the date and meeting rather than written into the note. Output without exactly one such line counts as a failed generation. The skill's *Without a chat* section is what an unattended run follows: judgment calls go into the note's *Sources & reliability* section instead of a conversation. Editing the skill changes both the unattended notes and the interactive skill.
 
 To work with the notes:
 
@@ -97,7 +97,7 @@ Every trigger logs under one tag, `journalctl -t granola-refresh`, as long as th
 
 ## Adding a digest
 
-`refresh.sh --digest` runs `granola-digest <mirror-dir> <pending-file>` if a command of that name is on PATH, and skips the step otherwise; no digest command ships with this repository. The pending file lists every mirror file that changed since the last successful digest, one path per line, and is emptied when the command exits 0. It runs before the notes step. A digest that writes its output under `<workspace>/updates/granola/` and appends glossary proposals to the auto tier gets both committed by `--commit`.
+`refresh.sh --digest` runs `granola-digest <mirror-dir> <pending-file>` if a command of that name is on PATH, and skips the step otherwise; no digest command ships with this repository. The pending file lists every mirror file that changed since the last successful digest, one path per line, and is emptied when the command exits 0. It runs before the notes step. A digest that writes its output under `<workspace>/updates/granola/` gets it committed by `--commit`.
 
 ## Reference
 
