@@ -259,10 +259,10 @@ for f in "${candidates[@]}"; do
     echo
     echo "# The meeting: Granola header + AI summary (UNRELIABLE, lossy), then the verbatim transcript (source of truth)"
     cat "$f"
-  } | CLAUDE_CODE_MAX_OUTPUT_TOKENS=128000 timeout 3600 claude -p --model claude-sonnet-5 --effort xhigh \
+  } | CLAUDE_CODE_MAX_OUTPUT_TOKENS=128000 timeout 3600 claude -p --model opus --effort medium \
         --tools "" --strict-mcp-config "$PROMPT" > "$tmp" 2>"$err"
-  # 128000 = sonnet-5's actual output cap; Claude Code's 64k default is half that, and a long
-  # meeting at high effort exceeds it (thinking counts toward output tokens).
+  # 128000 = the output cap of Opus 5.5, which `opus` resolves to; Claude Code's 64k default
+  # is half that, and a long meeting can exceed it (thinking counts toward output tokens).
   rc=$?
   # A heading after the marker is note content in the wrong place: splitting there would
   # move it out of the note and into the auto tier with nothing alarming.
