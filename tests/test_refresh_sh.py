@@ -12,6 +12,7 @@ import fcntl
 import json
 import os
 import shutil
+import subprocess
 import unittest
 
 from _harness import GM, GranolaSandbox
@@ -65,6 +66,36 @@ class Lock(RefreshSandbox):
         self.assertEqual(self.claude_call_count(), 1, r.stdout)
         self.assertTrue(os.path.exists(self.note_path("2026-08-19-standup-not_aaa.md")))
         self.assertEqual(self.ntfy_calls(), [], "a clean run must not page")
+
+
+class GlossaryCommit(RefreshSandbox):
+    def test_both_glossary_tiers_are_committed_in_their_own_repo(self):
+        """A promotion edits the reviewed tier as well as the auto tier, and workflows/ is
+        its own repo in the polyrepo layout, so --commit must commit both files there."""
+        git_env = dict(GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@example.invalid",
+                       GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@example.invalid")
+        wf_repo = os.path.dirname(self.wf)
+        row = "- Alice | \"Alyss\" | Med | 2026-08-01 sync"
+        with open(os.path.join(self.wf, "transcript-corrections-auto.md"), "w") as f:
+            f.write("# auto\n\n%s\n" % row)
+        with open(os.path.join(self.wf, "transcript-corrections.md"), "w") as f:
+            f.write("# reviewed\n")
+        for repo in (self.ws, wf_repo):
+            subprocess.run(("git", "init", "-q", repo), check=True)
+        subprocess.run(("git", "-C", wf_repo, "add", "."), check=True)
+        subprocess.run(("git", "-C", wf_repo, "commit", "-qm", "init"), check=True,
+                       env=dict(os.environ, **git_env))
+        self.mirror_file("2026-08-19-standup-not_aaa.md")
+        r = self.run_refresh("--commit", self.mirror, CLAUDE_STUB_GLOSSARY="promote: " + row,
+                             **git_env)
+        self.assertEqual(r.returncode, 0, r.stdout)
+        status = subprocess.run(("git", "-C", wf_repo, "status", "--porcelain"),
+                                capture_output=True, text=True, check=True).stdout
+        self.assertEqual(status, "", r.stdout)
+        shown = subprocess.run(("git", "-C", wf_repo, "show", "--stat", "--format=%s", "HEAD"),
+                               capture_output=True, text=True, check=True).stdout
+        self.assertIn("transcript-corrections.md", shown)
+        self.assertIn("transcript-corrections-auto.md", shown)
 
 
 class RunLevelAlarm(RefreshSandbox):

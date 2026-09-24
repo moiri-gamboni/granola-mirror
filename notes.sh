@@ -146,6 +146,39 @@ wedge_clear() { rm -f "$WEDGE_DIR/$1.json"; }
 held_mark()   { : > "$HELD_PREFIX$1"; }
 held_clear()  { rm -f "$HELD_PREFIX$1"; }
 
+# One promote/drop edit from a note's glossary tail. The target must be exactly one whole
+# line of the auto tier, or nothing changes: a miss is logged and counted, and skipping it
+# loses nothing (the row stays where it was). A promoted row is appended to the reviewed
+# tier under one fixed section, then removed from the auto tier by an atomic rewrite, so a
+# crash in between leaves it in both tiers rather than in neither.
+PROMOTED_HEADING="## Promoted from the auto tier"
+glossary_edit() {   # $1 promote|drop, $2 target row, $3 meeting basename
+  local verb="$1" row="$2" auto="$WF/transcript-corrections-auto.md" rev="$WF/transcript-corrections.md" t
+  if [ -z "$row" ] || [ ! -f "$auto" ] || [ "$(grep -cxF -- "$row" "$auto")" -ne 1 ] \
+     || { [ "$verb" = promote ] && [ ! -f "$rev" ]; }; then
+    echo "notes.sh: $verb target not found exactly once in the auto tier, left as is: $row"
+    glossary_misses=$((glossary_misses+1)); return 0
+  fi
+  if [ "$verb" = promote ]; then
+    if ! { grep -qxF "$PROMOTED_HEADING" "$rev" || printf '\n%s\n\n' "$PROMOTED_HEADING"; } >> "$rev" \
+       || ! printf '%s · promoted %s, backed by %s\n' "$row" "$(date +%F)" "$3" >> "$rev"; then
+      glossary_fail "could not append a promoted row to $rev"; return 0
+    fi
+  fi
+  t="$(mktemp "$WF/.corrections-auto.XXXXXX")"
+  if ROW="$row" awk '$0 != ENVIRON["ROW"]' "$auto" > "$t" && chmod --reference="$auto" "$t" \
+     && mv -f "$t" "$auto"; then
+    echo "notes.sh: $verb applied to the auto tier ($3): $row"
+  else
+    rm -f "$t"; glossary_fail "could not rewrite $auto for a $verb"
+  fi
+}
+glossary_fail() {   # a glossary write that failed counts as a failure of the run
+  echo "notes.sh: $1" >&2
+  [ -z "$FIRST_ERR" ] && FIRST_ERR="$1"
+  failed=$((failed+1))
+}
+
 # The skill's 'Without a chat' section carries the unattended deviations (chat items go to
 # Sources & reliability); the prompt restates the rules most often under-applied, asks for
 # the meeting's glossary proposals, and adds the output contract. The proposals follow a
@@ -153,9 +186,13 @@ held_clear()  { rm -f "$HELD_PREFIX$1"; }
 GLOSSARY_MARKER="<!-- glossary-additions -->"
 PROMPT="The meeting-note procedure is included below and is the spec for this transcript: follow it in full — extraction priorities, nuance-preservation rules, transcript reliability, privacy (never paste a secret's value), what to drop, and scaling the note to the meeting's consequence (a standup gets a TL;DR + action items, not the full skeleton). This is an unattended run, so its 'Without a chat' section applies. Also included: both transcript-corrections glossaries, then the meeting (Granola's header and AI summary, then the verbatim transcript).
 
-This prompt asks for glossary proposals. Propose rows ONLY for garbles in this meeting that neither glossary tier already covers, in the auto tier's row format: '- correct form (role/context) | garbles seen | High/Med/Low | source meeting'. New evidence that strengthens or contradicts an existing auto-tier row goes in Sources & reliability, not in a proposal.
+This prompt asks for glossary proposals and lets you maintain the auto tier; nobody reviews the glossary by hand, so these decisions are final unless later evidence reverses them.
+- New rows: propose rows ONLY for garbles in this meeting that neither glossary tier already covers, in the auto tier's row format: '- correct form (role/context) | garbles seen | High/Med/Low | source meeting'.
+- Promote: when this meeting independently confirms an auto-tier row (the correct form appears cleanly, or the same garble resolves the same way, and this meeting is not the row's source meeting), output 'promote: ' followed by that row copied character for character from the auto tier. It moves to the reviewed tier and is applied silently from then on, so promote only on evidence you would stake that on.
+- Drop: when this meeting clearly contradicts an auto-tier row, output 'drop: ' followed by that row copied character for character.
+- A row's presence in either file is never evidence for it. Give the evidence for every promote and drop in Sources & reliability. The reviewed tier's rows are not yours to change.
 
-Output the note body in markdown, starting directly at the '# <Meeting title> — <YYYY-MM-DD>' heading. No preamble, no meta-commentary, no code fence around the note. After the note, output a line containing exactly $GLOSSARY_MARKER and then one proposal per line, or the single word none. Nothing after the proposals. Everything before the marker is written verbatim to the note file; everything after it is appended to the auto tier."
+Output the note body in markdown, starting directly at the '# <Meeting title> — <YYYY-MM-DD>' heading. No preamble, no meta-commentary, no code fence around the note. After the note, output a line containing exactly $GLOSSARY_MARKER and then one line per new row, promote or drop, or the single word none. Nothing after those lines, and no headings. Everything before the marker is written verbatim to the note file; everything after it goes to the glossary."
 
 candidates=()
 if [ ${#FILES[@]} -gt 0 ]; then
@@ -170,7 +207,7 @@ else
   done
 fi
 
-written=0 current=0 missing=0 settling=0 failed=0 attempted=0
+written=0 current=0 missing=0 settling=0 failed=0 attempted=0 glossary_misses=0
 unstamped=0 held_incoherent=0 held_edited=0 held_unparseable=0
 FIRST_ERR=""
 for f in "${candidates[@]}"; do
@@ -266,19 +303,28 @@ for f in "${candidates[@]}"; do
   { printf '%s\n\n' "$banner"; cat "$tmp"; } > "$npub"
   mv -f "$npub" "$note"
   rm -f "$tmp" "$err"
-  # Appended verbatim under a dated heading naming the meeting (no row parsing, so model
-  # format drift can't break the append). refresh.sh --commit commits it. A failed append
-  # counts as a failure: the note is already current, so these rows are never re-proposed.
-  if [ -n "$rows" ]; then
+  # The tail's 'promote:' and 'drop:' lines are edits to existing auto-tier rows; every
+  # other line is a new proposal. Edits apply first, so a row promoted and re-proposed in
+  # the same tail is not deleted along with its duplicate.
+  proposals=""
+  while IFS= read -r line; do
+    case "$line" in
+      [Pp]romote:*) glossary_edit promote "$(printf '%s' "${line#*:}" | sed 's/^[[:space:]]*//')" "$fbase" ;;
+      [Dd]rop:*)    glossary_edit drop "$(printf '%s' "${line#*:}" | sed 's/^[[:space:]]*//')" "$fbase" ;;
+      *) [ -n "$line" ] && proposals+="$line"$'\n' ;;
+    esac
+  done <<< "$rows"
+  # New proposals are appended verbatim under a dated heading naming the meeting (no row
+  # parsing, so model format drift can't break the append). refresh.sh --commit commits
+  # both tiers. A failed append counts as a failure: the note is already current, so these
+  # rows would never be proposed again.
+  if [ -n "$proposals" ]; then
     AUTO="$WF/transcript-corrections-auto.md"
     if [ -f "$AUTO" ]; then
-      if { echo; echo "## $(date +%F) — $fbase"; echo; printf '%s\n' "$rows"; } >> "$AUTO"; then
-        echo "notes.sh: appended $(printf '%s\n' "$rows" | grep -c .) glossary proposal(s) to $AUTO"
+      if { echo; echo "## $(date +%F) — $fbase"; echo; printf '%s' "$proposals"; } >> "$AUTO"; then
+        echo "notes.sh: appended $(printf '%s' "$proposals" | grep -c .) glossary proposal(s) to $AUTO"
       else
-        why="could not append glossary proposals for $fbase to $AUTO"
-        echo "notes.sh: $why; rows: $rows" >&2
-        [ -z "$FIRST_ERR" ] && FIRST_ERR="$why"
-        failed=$((failed+1))
+        glossary_fail "could not append glossary proposals for $fbase to $AUTO; rows: $proposals"
       fi
     else
       echo "notes.sh: WARNING: $AUTO missing; proposals for $fbase dropped: $rows" >&2
@@ -296,10 +342,11 @@ echo "notes.sh: $written written, $current current, $missing awaiting transcript
 # quotes/newlines can't break the JSON.
 export FIRST_ERR
 python3 - "$attempted" "$written" "$failed" "$current" "$missing" "$settling" \
-         "$unstamped" "$held_incoherent" "$held_edited" "$held_unparseable" > "$RUN_JSON" <<'PY'
+         "$unstamped" "$held_incoherent" "$held_edited" "$held_unparseable" \
+         "$glossary_misses" > "$RUN_JSON" <<'PY'
 import json, os, sys
 k = ["attempted", "written", "failed", "current", "missing", "settling",
-     "unstamped", "held_incoherent", "held_edited", "held_unparseable"]
+     "unstamped", "held_incoherent", "held_edited", "held_unparseable", "glossary_misses"]
 d = {name: int(v) for name, v in zip(k, sys.argv[1:])}
 d["first_error"] = os.environ.get("FIRST_ERR", "")
 print(json.dumps(d))

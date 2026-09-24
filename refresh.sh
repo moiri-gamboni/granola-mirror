@@ -86,11 +86,12 @@ alert_once() {
 disarm() { rm -f "$STATE/granola-alert-$1"; }
 
 # Commit just the mirror + any digest output under updates/granola/ + the auto meeting notes
-# + the auto glossary tier (the file notes.sh appends each note's glossary proposals to). Pathspec commits, so
-# anything else already staged is left untouched. In a polyrepo layout workflows/ can be
-# its own repo — the auto tier is committed in whichever repo it actually lives.
+# + both glossary tiers (notes.sh appends proposals to the auto tier and moves promoted rows
+# into the reviewed one). Pathspec commits, so anything else already staged is left
+# untouched. In a polyrepo layout workflows/ can be its own repo — the tiers are committed
+# in whichever repo they actually live.
 commit_mirror() {
-  local repo updates auto autorepo
+  local repo updates auto autorepo g
   # rev-parse is expected to fail when the mirror isn't in a repo — a supported setup
   if ! repo=$(git -C "$DIR" rev-parse --show-toplevel 2>/dev/null); then
     echo "  $DIR is not inside a git repo — skipping commit"
@@ -98,9 +99,16 @@ commit_mirror() {
   fi
   updates="$WS/updates/granola"
   auto="$WS/workflows/meetings/transcript-corrections-auto.md"
+  local tiers=("$auto" "$WS/workflows/meetings/transcript-corrections.md")
   autorepo=""
-  # same expected-fail probe as above, for the auto tier's own location
+  # same expected-fail probe as above, for the tiers' own location
   [ -f "$auto" ] && autorepo=$(git -C "$(dirname "$auto")" rev-parse --show-toplevel 2>/dev/null)
+  local gloss=()   # the tiers that exist and have changes, in whichever repo holds them
+  if [ -n "$autorepo" ]; then
+    for g in "${tiers[@]}"; do
+      [ -f "$g" ] && [ -n "$(git -C "$autorepo" status --porcelain -- "$g")" ] && gloss+=("$g")
+    done
+  fi
   local paths=("$DIR")
   # only include optional paths that actually have changes — a pathspec matching
   # nothing known to git makes `git commit -- <paths>` fail outright
@@ -110,7 +118,7 @@ commit_mirror() {
   local autonotes; autonotes="$WS/meetings/notes/*-not_*.note.md"
   [ -d "$updates" ] && [ -n "$(git -C "$repo" status --porcelain -- "$updates")" ] && paths+=("$updates")
   [ -n "$(git -C "$repo" status --porcelain -- "$autonotes" 2>/dev/null)" ] && paths+=("$autonotes")
-  [ "$autorepo" = "$repo" ] && [ -n "$(git -C "$repo" status --porcelain -- "$auto")" ] && paths+=("$auto")
+  [ "$autorepo" = "$repo" ] && paths+=("${gloss[@]}")
   if [ -n "$(git -C "$repo" status --porcelain -- "${paths[@]}")" ]; then
     git -C "$repo" add -- "${paths[@]}"
     if git -C "$repo" commit -q -m "granola: mirror refresh $(date +%F)" -- "${paths[@]}"; then
@@ -121,13 +129,12 @@ commit_mirror() {
   else
     echo "  nothing to commit"
   fi
-  if [ -n "$autorepo" ] && [ "$autorepo" != "$repo" ] && \
-     [ -n "$(git -C "$autorepo" status --porcelain -- "$auto")" ]; then
-    git -C "$autorepo" add -- "$auto"
-    if git -C "$autorepo" commit -q -m "corrections: auto-tier proposals $(date +%F)" -- "$auto"; then
+  if [ -n "$autorepo" ] && [ "$autorepo" != "$repo" ] && [ ${#gloss[@]} -gt 0 ]; then
+    git -C "$autorepo" add -- "${gloss[@]}"
+    if git -C "$autorepo" commit -q -m "corrections: glossary updates $(date +%F)" -- "${gloss[@]}"; then
       echo "  $(git -C "$autorepo" log --oneline -1)"
     else
-      echo "  auto-tier commit failed"
+      echo "  glossary commit failed"
     fi
   fi
 }

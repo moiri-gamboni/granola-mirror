@@ -7,6 +7,7 @@ recorded values, never an mtime. Fail-closed: any value that won't parse resolve
 so an unreadable banner is never silently overwritten.
 """
 import os
+import re
 import subprocess
 import unittest
 
@@ -222,6 +223,53 @@ class GlossaryProposals(GranolaSandbox):
         self.mirror_file(self.NAME)
         self.notes_sh(self.mirror, *LOW)
         self.assertEqual(self.read(auto), "# auto tier\n")
+
+    ROW = "- Alice (ops lead) | garble seen: \"Alyss\" | Med | 2026-08-01 sync"
+
+    def tiers(self):
+        auto = os.path.join(self.wf, "transcript-corrections-auto.md")
+        with open(auto, "w") as f:
+            f.write("# auto tier\n\n## 2026-08-01 — sync\n\n%s\n- Bob | \"Rob\" | Low | x\n" % self.ROW)
+        reviewed = os.path.join(self.wf, "transcript-corrections.md")
+        with open(reviewed, "w") as f:
+            f.write("# reviewed tier\n\n## People\n| a | b |\n")
+        return auto, reviewed
+
+    def test_promote_moves_the_exact_row_to_the_reviewed_tier(self):
+        auto, reviewed = self.tiers()
+        self.mirror_file(self.NAME)
+        r = self.notes_sh(self.mirror, *LOW, CLAUDE_STUB_GLOSSARY="promote: " + self.ROW)
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertNotIn(self.ROW, self.read(auto))
+        self.assertIn("- Bob", self.read(auto))
+        rev = self.read(reviewed)
+        self.assertIn("## Promoted from the auto tier", rev)
+        self.assertRegex(rev, re.escape(self.ROW) + r" · promoted \d{4}-\d{2}-\d{2}, backed by "
+                         + re.escape("2026-08-19-standup-not_aaa"))
+        # A second promotion appends under the same section rather than a new one.
+        self.mirror_file("2026-08-20-standup-not_bbb.md")
+        self.notes_sh(self.mirror, *LOW, CLAUDE_STUB_GLOSSARY="promote: - Bob | \"Rob\" | Low | x")
+        self.assertEqual(self.read(reviewed).count("## Promoted from the auto tier"), 1)
+
+    def test_drop_removes_the_exact_row(self):
+        auto, reviewed = self.tiers()
+        before = self.read(reviewed)
+        self.mirror_file(self.NAME)
+        r = self.notes_sh(self.mirror, *LOW, CLAUDE_STUB_GLOSSARY="drop: " + self.ROW)
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertNotIn(self.ROW, self.read(auto))
+        self.assertEqual(self.read(reviewed), before)
+
+    def test_a_target_that_is_not_an_exact_row_changes_nothing(self):
+        auto, reviewed = self.tiers()
+        a0, r0 = self.read(auto), self.read(reviewed)
+        self.mirror_file(self.NAME)
+        r = self.notes_sh(self.mirror, *LOW,
+                          CLAUDE_STUB_GLOSSARY="promote: - Alice (ops lead)\ndrop: - Carol | x")
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertEqual((self.read(auto), self.read(reviewed)), (a0, r0))
+        self.assertIn("not found exactly once", r.stdout)
+        self.assertEqual(self.run_summary()["glossary_misses"], 2)
 
     def test_none_variants_append_nothing(self):
         auto = self.auto_tier()
