@@ -14,6 +14,12 @@ Requirements: Python 3 (standard library only), bash, `flock`, git, and a logged
    GRANOLA_MIRROR=/path/to/workspace/meetings/granola
    ```
 
+   If the workspace is a plain folder and the mirror's folder is its own repository (for example `<workspace>/meetings/` holding `granola/` and `notes/`), name the workspace too, since the mirror's git toplevel is then that folder:
+
+   ```sh
+   GRANOLA_WORKSPACE=/path/to/workspace
+   ```
+
    Then `granola sync <mirror-dir>` fills it with one file per meeting (header and AI summary).
 4. For transcripts, provide `~/.config/granola/mcp-tokens.json` (`access_token`, `refresh_token`) and `~/.config/granola/mcp-client.json` (`client_id`, `as` = authorization-server URL, `res` = resource), obtained through Granola's MCP OAuth flow. Nothing here performs that authorization; `granola-transcripts` refreshes the token from then on, and exits 3 when the refresh token itself has expired and you need to authorize again. `granola-transcripts sync <mirror-dir>` adds the transcripts.
 5. Schedule the pipeline, for example in an `/etc/cron.d` file (drop the user field in a personal crontab). `claude` must be on the scheduler's PATH (cron's and systemd's defaults usually lack `~/.local/bin`), or every note generation fails:
@@ -46,7 +52,7 @@ Requirements: Python 3 (standard library only), bash, `flock`, git, and a logged
 
 ## What ends up in the workspace
 
-The workspace is the git toplevel of the mirror directory, or the mirror directory's parent when it is not in a repository.
+The workspace is `GRANOLA_WORKSPACE` (from the environment or `~/.config/granola/env`) when set, else the git toplevel of the mirror directory, else the mirror directory's parent when it is not in a repository. `--commit` commits the mirror and the generated notes in the repository holding the mirror.
 
 - **The mirror** (`$GRANOLA_MIRROR`): one `YYYY-MM-DD-<slug>-<note-id>.md` per meeting, holding Granola's header (with a `granola updated_at` version line), its AI summary, and a `## Transcript` section, one speaker turn per line, stamped with the meeting version it was fetched against.
 - **`meetings/notes/<mirror-basename>.note.md`**: the generated notes. Line 1 is a generator banner. Notes you write by hand can sit in the same directory; `--commit` only commits generated ones (`*-not_*.note.md`, after Granola's `not_` note ids).

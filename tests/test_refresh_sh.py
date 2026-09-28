@@ -240,6 +240,30 @@ class EnvFileConfig(RefreshSandbox):
         self.assertEqual(r.returncode, 0, r.stdout)
         self.assertTrue(os.path.exists(self.note_path("2026-08-19-standup-not_aaa.md")), r.stdout)
 
+    def test_the_env_file_workspace_applies_to_a_mirror_given_as_an_argument(self):
+        """The webhook receiver passes the mirror as an argument, so the env file's
+        GRANOLA_WORKSPACE must be read even then. With meetings/ its own repository in a
+        plain workspace folder, --commit commits the mirror and the auto note there."""
+        git_env = dict(GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@example.invalid",
+                       GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@example.invalid")
+        meetings = os.path.join(self.ws, "meetings")
+        subprocess.run(("git", "init", "-q", meetings), check=True)
+        new_mirror = os.path.join(meetings, "granola")
+        os.rename(self.mirror, new_mirror)
+        self.mirror = new_mirror
+        self.mirror_file("2026-08-19-standup-not_aaa.md")
+        cfg = os.path.join(self.home, ".config", "granola")
+        os.makedirs(cfg, exist_ok=True)
+        with open(os.path.join(cfg, "env"), "w") as f:
+            f.write(f"GRANOLA_MIRROR={self.mirror}\nGRANOLA_WORKSPACE={self.ws}\n")
+        r = self.run_refresh("--commit", self.mirror, **git_env)
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertTrue(os.path.exists(self.note_path("2026-08-19-standup-not_aaa.md")), r.stdout)
+        tracked = subprocess.run(("git", "-C", meetings, "ls-files"),
+                                 capture_output=True, text=True, check=True).stdout.split()
+        self.assertIn("granola/2026-08-19-standup-not_aaa.md", tracked, r.stdout)
+        self.assertIn("notes/2026-08-19-standup-not_aaa.note.md", tracked, r.stdout)
+
     def test_no_path_anywhere_still_refuses(self):
         r = self.run_refresh(GRANOLA_MIRROR="")
         self.assertEqual(r.returncode, 2, r.stdout)

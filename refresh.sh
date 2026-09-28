@@ -54,9 +54,17 @@ if [ -z "$DIR" ] && [ -f "$HOME/.config/granola/env" ]; then
 fi
 [ -n "$DIR" ] || { echo "usage: granola-refresh [--commit] <mirror-dir>   (or set GRANOLA_MIRROR in the environment or ~/.config/granola/env)" >&2; exit 2; }
 # Workspace root — where meetings/notes/, workflows/meetings/ and updates/granola live:
-# the git toplevel of the mirror dir, so the mirror may sit anywhere inside the workspace
-# repo. Non-git deployments fall back to the mirror dir's parent.
-WS="$(git -C "$DIR" rev-parse --show-toplevel 2>/dev/null || dirname "$DIR")"
+# GRANOLA_WORKSPACE from the environment or ~/.config/granola/env (read even when the
+# mirror came as an argument, as it does from the webhook receiver), else the git toplevel
+# of the mirror dir, so the mirror may sit anywhere inside a workspace repo; non-git
+# deployments fall back to the mirror dir's parent. The setting is for a workspace that is
+# a plain folder whose meetings folder is its own repo: there the toplevel is that folder.
+# Exported so the notes.sh this runs resolves the same root.
+if [ -z "${GRANOLA_WORKSPACE:-}" ] && [ -f "$HOME/.config/granola/env" ]; then
+  GRANOLA_WORKSPACE="$(sed -n 's/^GRANOLA_WORKSPACE=//p' "$HOME/.config/granola/env" | tail -n 1)"
+fi
+WS="${GRANOLA_WORKSPACE:-$(git -C "$DIR" rev-parse --show-toplevel 2>/dev/null || dirname "$DIR")}"
+export GRANOLA_WORKSPACE="$WS"
 STATE="$HOME/.local/state"; mkdir -p "$STATE"
 CHANGED="$STATE/granola-changed.txt"
 PENDING="$STATE/granola-digest-pending.txt"

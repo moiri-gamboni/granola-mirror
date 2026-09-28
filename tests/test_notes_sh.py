@@ -347,6 +347,21 @@ class WorkspaceLayout(GranolaSandbox):
         self.assertTrue(os.path.exists(self.note_path("2026-08-19-standup-not_aaa.md")), r.stdout)
         self.assertFalse(os.path.isdir(os.path.join(self.ws, "meetings", "meetings")))
 
+    def test_granola_workspace_names_the_workspace_when_the_meetings_folder_is_its_own_repo(self):
+        """When the workspace is a plain folder and meetings/ is its own repository, the git
+        toplevel is meetings/ itself; GRANOLA_WORKSPACE names the real workspace, so notes
+        land in <ws>/meetings/notes and not in <ws>/meetings/meetings/notes."""
+        meetings = os.path.join(self.ws, "meetings")
+        subprocess.run(("git", "init", "-q", meetings), check=True)
+        new_mirror = os.path.join(meetings, "granola")
+        os.rename(self.mirror, new_mirror)
+        self.mirror = new_mirror
+        self.mirror_file("2026-08-19-standup-not_aaa.md")
+        r = self.notes_sh(self.mirror, *LOW, GRANOLA_WORKSPACE=self.ws)
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertTrue(os.path.exists(self.note_path("2026-08-19-standup-not_aaa.md")), r.stdout)
+        self.assertFalse(os.path.isdir(os.path.join(meetings, "meetings")))
+
 
 if __name__ == "__main__":
     unittest.main()

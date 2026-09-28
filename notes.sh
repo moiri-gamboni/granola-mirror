@@ -61,9 +61,15 @@ if [ -z "$DIR" ] || [ ! -d "$DIR" ]; then
   echo "usage: notes.sh DIR [FILE...] [--since YYYY-MM-DD] [--force]" >&2; exit 2
 fi
 DIR="$(cd "$DIR" && pwd)"
-# Workspace root — the git toplevel of the mirror dir, so the mirror may sit anywhere
-# inside the workspace repo; non-git deployments fall back to the mirror dir's parent.
-BASE="$(git -C "$DIR" rev-parse --show-toplevel 2>/dev/null || dirname "$DIR")"
+# Workspace root — GRANOLA_WORKSPACE from the environment or ~/.config/granola/env,
+# else the git toplevel of the mirror dir, so the mirror may sit anywhere inside the
+# workspace repo; non-git deployments fall back to the mirror dir's parent. refresh.sh
+# resolves it the same way (its comment says when the setting is needed).
+BASE="${GRANOLA_WORKSPACE:-}"
+if [ -z "$BASE" ] && [ -f "$HOME/.config/granola/env" ]; then
+  BASE="$(sed -n 's/^GRANOLA_WORKSPACE=//p' "$HOME/.config/granola/env" | tail -n 1)"
+fi
+BASE="${BASE:-$(git -C "$DIR" rev-parse --show-toplevel 2>/dev/null || dirname "$DIR")}"
 NOTES_DIR="$BASE/meetings/notes"
 STATE="$HOME/.local/state"; mkdir -p "$STATE" "$NOTES_DIR"
 WEDGE_DIR="$STATE/granola-note-wedge"
