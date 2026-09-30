@@ -227,6 +227,161 @@ class OAuthAlarm(RefreshSandbox):
         self.assertTrue(any("re-auth" in c.lower() for c in self.ntfy_calls()), r.stdout)
 
 
+class GeminiRefresh(RefreshSandbox):
+    def configure_env_file(self, text):
+        cfg = os.path.join(self.home, ".config", "granola")
+        os.makedirs(cfg, exist_ok=True)
+        with open(os.path.join(cfg, "env"), "w") as f:
+            f.write(text)
+
+    def pages(self, title):
+        return [c for c in self.ntfy_calls() if "Title: " + title in c]
+
+    def test_an_unset_remote_skips_the_step(self):
+        self.mirror_file("2026-08-19-standup-not_aaa.md")
+        r = self.run_refresh(self.mirror, GEMINI_RCLONE_REMOTE="")
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertEqual(self.gemini_notes_calls_made(), [])
+        self.assertFalse(os.path.exists(os.path.join(self.ws, "meetings", "gemini")))
+
+    def test_env_file_remote_runs_with_an_argument_and_before_the_digest(self):
+        self.mirror_file("2026-08-19-standup-not_aaa.md")
+        self.configure_env_file("GEMINI_RCLONE_REMOTE=drive-test:\n")
+        self.enable_digest_stub()
+        r = self.run_refresh("--digest", self.mirror, GEMINI_RCLONE_REMOTE="")
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertEqual(self.gemini_notes_calls_made(), [
+            "sync %s --remote drive-test:" % os.path.join(self.ws, "meetings", "gemini")
+        ])
+        self.assertLess(r.stdout.index("granola-refresh: transcripts"),
+                        r.stdout.index("gemini-notes stub called"), r.stdout)
+        self.assertLess(r.stdout.index("gemini-notes stub called"),
+                        r.stdout.index("granola-refresh: digest"), r.stdout)
+        self.assertTrue(os.path.isdir(os.path.join(self.ws, "meetings", "gemini")))
+
+    def test_environment_remote_overrides_the_env_file(self):
+        self.configure_env_file("GRANOLA_MIRROR=%s\nGEMINI_RCLONE_REMOTE=file-remote:\n" % self.mirror)
+        r = self.run_refresh(GRANOLA_MIRROR="", GEMINI_RCLONE_REMOTE="env-remote:")
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertEqual(self.gemini_notes_calls_made(), [
+            "sync %s --remote env-remote:" % os.path.join(self.ws, "meetings", "gemini")
+        ])
+
+    def test_query_failure_pages_line_one_then_success_rearms_and_notes_still_run(self):
+        self.mirror_file("2026-08-19-standup-not_aaa.md")
+        err = "gemini-notes: query failed: first query problem\nsecond diagnostic line"
+        first = self.run_refresh(self.mirror, GEMINI_RCLONE_REMOTE="drive-test:",
+                                 GEMINI_NOTES_RC="1", GEMINI_NOTES_STDERR=err)
+        self.assertEqual(first.returncode, 0, first.stdout)
+        self.assertIn(err, first.stdout, "all child stderr lines must remain in the refresh log")
+        self.assertEqual(self.claude_call_count(), 1, first.stdout)
+        pages = self.pages("Gemini notes fetch failed")
+        self.assertEqual(len(pages), 1, self.ntfy_calls())
+        self.assertIn("first query problem; see journalctl -t granola-refresh", pages[0])
+        self.assertNotIn("second diagnostic line", pages[0])
+
+        healthy = self.run_refresh(self.mirror, GEMINI_RCLONE_REMOTE="drive-test:",
+                                   GEMINI_NOTES_RC="0", GEMINI_NOTES_STDERR="")
+        self.assertEqual(healthy.returncode, 0, healthy.stdout)
+        self.assertIn("granola-refresh: notes", healthy.stdout)
+        again = self.run_refresh(self.mirror, GEMINI_RCLONE_REMOTE="drive-test:",
+                                 GEMINI_NOTES_RC="1", GEMINI_NOTES_STDERR=err)
+        self.assertEqual(again.returncode, 0, again.stdout)
+        self.assertIn("granola-refresh: notes", again.stdout)
+        self.assertEqual(len(self.pages("Gemini notes fetch failed")), 2, self.ntfy_calls())
+
+    def test_export_failures_and_a_later_query_failure_page_independently(self):
+        self.mirror_file("2026-08-19-standup-not_aaa.md")
+        export_err = ("gemini-notes: export failed doc-aaa: missing\n"
+                      "gemini-notes: export failed doc-bbb: denied")
+        first = self.run_refresh(self.mirror, GEMINI_RCLONE_REMOTE="drive-test:",
+                                 GEMINI_NOTES_RC="2", GEMINI_NOTES_STDERR=export_err)
+        self.assertEqual(first.returncode, 0, first.stdout)
+        self.assertIn(export_err, first.stdout)
+        doc_pages = self.pages("Gemini notes: some docs failed")
+        self.assertEqual(len(doc_pages), 1, self.ntfy_calls())
+        self.assertIn("doc-aaa doc-bbb", doc_pages[0])
+        self.assertEqual(self.pages("Gemini notes fetch failed"), [])
+
+        query_err = "gemini-notes: query failed: later query problem"
+        second = self.run_refresh(self.mirror, GEMINI_RCLONE_REMOTE="drive-test:",
+                                  GEMINI_NOTES_RC="1", GEMINI_NOTES_STDERR=query_err)
+        self.assertEqual(second.returncode, 0, second.stdout)
+        self.assertIn(query_err, second.stdout)
+        self.assertIn("granola-refresh: notes", second.stdout)
+        self.assertEqual(len(self.pages("Gemini notes: some docs failed")), 1,
+                         "no export-failed lines disarm the document alarm")
+        self.assertEqual(len(self.pages("Gemini notes fetch failed")), 1, self.ntfy_calls())
+        self.assertFalse(os.path.exists(os.path.join(self.state, "granola-alert-gemini-docs")))
+        self.assertTrue(os.path.exists(os.path.join(self.state, "granola-alert-gemini")))
+
+    def test_meet_failure_pages_the_first_line_and_clears_when_absent(self):
+        self.mirror_file("2026-08-19-standup-not_aaa.md")
+        first_line = "gemini-notes: meet failed: synthetic list failure"
+        stderr = first_line + "\ngemini-notes: meet failed rec-123: conference failure"
+        first = self.run_refresh(self.mirror, GEMINI_RCLONE_REMOTE="drive-test:",
+                                 GEMINI_NOTES_RC="2", GEMINI_NOTES_STDERR=stderr)
+        self.assertEqual(first.returncode, 0, first.stdout)
+        self.assertIn(stderr, first.stdout)
+        meet_pages = self.pages("Gemini notes: Meet transcripts failed")
+        self.assertEqual(len(meet_pages), 1, self.ntfy_calls())
+        self.assertIn(first_line, meet_pages[0])
+        self.assertNotIn("conference failure", meet_pages[0])
+
+        healthy = self.run_refresh(self.mirror, GEMINI_RCLONE_REMOTE="drive-test:",
+                                   GEMINI_NOTES_RC="0", GEMINI_NOTES_STDERR="")
+        self.assertEqual(healthy.returncode, 0, healthy.stdout)
+        self.assertIn("granola-refresh: notes", healthy.stdout)
+        self.assertFalse(os.path.exists(os.path.join(self.state, "granola-alert-gemini-meet")))
+        again = self.run_refresh(self.mirror, GEMINI_RCLONE_REMOTE="drive-test:",
+                                 GEMINI_NOTES_RC="2",
+                                 GEMINI_NOTES_STDERR="gemini-notes: meet failed rec-456: retry")
+        self.assertEqual(again.returncode, 0, again.stdout)
+        self.assertIn("granola-refresh: notes", again.stdout)
+        self.assertEqual(len(self.pages("Gemini notes: Meet transcripts failed")), 2,
+                         self.ntfy_calls())
+
+    def test_commit_includes_gemini_files_and_supersede_deletion(self):
+        git_env = dict(GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@example.invalid",
+                       GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@example.invalid")
+        gemini = os.path.join(self.ws, "meetings", "gemini")
+        old_mirror = os.path.join(gemini, "2026-08-01-old-gem_old123.md")
+        old_note = os.path.join(self.notes, "2026-08-01-old-gem_old123.note.md")
+        os.makedirs(gemini, exist_ok=True)
+        with open(old_mirror, "w") as f:
+            f.write("old mirror\n")
+        with open(old_note, "w") as f:
+            f.write("old Gemini-only note\n")
+        with open(os.path.join(self.mirror, ".keep"), "w") as f:
+            f.write("tracked mirror directory\n")
+        subprocess.run(("git", "init", "-q", self.ws), check=True)
+        subprocess.run(("git", "-C", self.ws, "add", "granola", "meetings/gemini", "meetings/notes"), check=True)
+        subprocess.run(("git", "-C", self.ws, "commit", "-qm", "seed"), check=True,
+                       env=dict(os.environ, **git_env))
+
+        os.unlink(old_mirror)
+        os.unlink(old_note)
+        new_mirror = os.path.join(gemini, "2026-08-19-team-sync-gem_doc123.md")
+        new_note = os.path.join(self.notes, "2026-08-19-team-sync-gem_doc123.note.md")
+        with open(new_mirror, "w") as f:
+            f.write("new mirror\n")
+        with open(new_note, "w") as f:
+            f.write("new Gemini-only note\n")
+        manual = os.path.join(self.notes, "hand-written.note.md")
+        with open(manual, "w") as f:
+            f.write("leave this untracked\n")
+
+        r = self.run_refresh("--commit", self.mirror, GEMINI_RCLONE_REMOTE="drive-test:", **git_env)
+        self.assertEqual(r.returncode, 0, r.stdout)
+        shown = subprocess.run(("git", "-C", self.ws, "show", "--name-status", "--format=", "HEAD"),
+                               capture_output=True, text=True, check=True).stdout
+        self.assertIn("A\tmeetings/gemini/2026-08-19-team-sync-gem_doc123.md", shown)
+        self.assertIn("D\tmeetings/gemini/2026-08-01-old-gem_old123.md", shown)
+        self.assertIn("A\tmeetings/notes/2026-08-19-team-sync-gem_doc123.note.md", shown)
+        self.assertIn("D\tmeetings/notes/2026-08-01-old-gem_old123.note.md", shown)
+        self.assertNotIn("hand-written.note.md", shown)
+
+
 class EnvFileConfig(RefreshSandbox):
     def test_the_env_file_supplies_the_mirror_dir(self):
         """With no argument and no environment value, ~/.config/granola/env provides
@@ -235,10 +390,13 @@ class EnvFileConfig(RefreshSandbox):
         cfg = os.path.join(self.home, ".config", "granola")
         os.makedirs(cfg, exist_ok=True)
         with open(os.path.join(cfg, "env"), "w") as f:
-            f.write(f"GRANOLA_MIRROR={self.mirror}\n")
-        r = self.run_refresh(GRANOLA_MIRROR="")
+            f.write(f"GRANOLA_MIRROR={self.mirror}\nGEMINI_RCLONE_REMOTE=drive-test:\n")
+        r = self.run_refresh(GRANOLA_MIRROR="", GEMINI_RCLONE_REMOTE="")
         self.assertEqual(r.returncode, 0, r.stdout)
         self.assertTrue(os.path.exists(self.note_path("2026-08-19-standup-not_aaa.md")), r.stdout)
+        self.assertEqual(self.gemini_notes_calls_made(), [
+            "sync %s --remote drive-test:" % os.path.join(self.ws, "meetings", "gemini")
+        ])
 
     def test_the_env_file_workspace_applies_to_a_mirror_given_as_an_argument(self):
         """The webhook receiver passes the mirror as an argument, so the env file's
