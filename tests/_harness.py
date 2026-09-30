@@ -111,9 +111,11 @@ else:
 # urllib.request.urlopen reaches no network. A route key is "METHOD URL-without-query",
 # plus " <pageToken>" for a later page; its value is {"status": N, "body": <json>}, or
 # {"timeout": true} for a server that accepts the request and never answers. An unrouted
-# request answers 404. Every request is appended to HTTP_STUB_CALLS as JSON.
+# request answers 404. A route may set `incomplete_read: true` to raise
+# http.client.IncompleteRead, or `http_error_body_incomplete_read: true` to raise it when
+# reading an HTTP error body. Every request is appended to HTTP_STUB_CALLS as JSON.
 SITECUSTOMIZE = r'''
-import io, json, os, urllib.error, urllib.parse, urllib.request
+import http.client, io, json, os, urllib.error, urllib.parse, urllib.request
 
 def _urlopen(req, data=None, timeout=None, **kw):
     if isinstance(req, str):
@@ -131,6 +133,15 @@ def _urlopen(req, data=None, timeout=None, **kw):
         route = json.load(f).get(key, {"status": 404, "body": {"error": "no stub route: " + key}})
     if route.get("timeout"):
         raise TimeoutError("timed out")
+    if route.get("incomplete_read"):
+        raise http.client.IncompleteRead(b"partial", 10)
+    if route.get("http_error_body_incomplete_read"):
+        class IncompleteBody:
+            def read(self, *args, **kwargs):
+                raise http.client.IncompleteRead(b"partial", 10)
+            def close(self):
+                pass
+        raise urllib.error.HTTPError(req.full_url, route["status"], "stub", {}, IncompleteBody())
     raw = json.dumps(route["body"]).encode()
     if route["status"] >= 400:
         raise urllib.error.HTTPError(req.full_url, route["status"], "stub", {}, io.BytesIO(raw))
@@ -433,9 +444,17 @@ class GeminiSandbox(GranolaSandbox):
         with open(os.path.join(self.rclone_dir, "docs", doc_id + ".md"), "w") as f:
             f.write(body)
 
-    def route(self, method, url, body, status=200, page_token=None, timeout=False):
+    def route(self, method, url, body, status=200, page_token=None, timeout=False,
+              incomplete_read=False, http_error_body_incomplete_read=False):
         key = "%s %s" % (method, url) + (" " + page_token if page_token else "")
-        self.routes[key] = {"timeout": True} if timeout else {"status": status, "body": body}
+        if timeout:
+            self.routes[key] = {"timeout": True}
+        elif incomplete_read:
+            self.routes[key] = {"incomplete_read": True}
+        elif http_error_body_incomplete_read:
+            self.routes[key] = {"status": status, "http_error_body_incomplete_read": True}
+        else:
+            self.routes[key] = {"status": status, "body": body}
         with open(self.http_routes, "w") as f:
             json.dump(self.routes, f)
 
