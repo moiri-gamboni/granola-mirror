@@ -79,6 +79,9 @@ def note_markdown(n):
         out.append(f'- **Owner:** {o.get("name","")} <{o.get("email","")}>')
     if att:
         out.append(f'- **Attendees:** {att}')
+    event = (n.get("calendar_event") or {}).get("calendar_event_id")
+    if event:
+        out.append(f'- **Calendar event:** {event}')
     if n.get("web_url"):
         out.append(f'- **Granola:** {n["web_url"]}')
     out += ["", (n.get("summary_markdown") or n.get("summary_text") or "_(no summary)_")]
