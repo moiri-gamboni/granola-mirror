@@ -264,25 +264,31 @@ class GranolaSandbox(unittest.TestCase):
         return path
 
     def gemini_file(self, name, modified="2026-09-30T12:00:00.000Z", event="evt123",
-                    transcript=True, meet_lines=None):
+                    transcript=True, meet_lines=None, topic_heading=None):
         """Writes one Gemini mirror file under <workspace>/meetings/gemini/ as gemini-notes
         writes it, for suites that read the mirror. `name` is the basename (`<date>-<slug>-gem_<doc id>.md`); event=None omits the
-        Calendar event line; transcript=False gives a notes-only doc (no Transcript tab);
+        Calendar event line; transcript=False gives a notes-only doc (no turns);
         meet_lines, a list of `[HH:MM:SS] **Name:** text` lines, appends a Meet section
-        (an empty list gives the section with no entries)."""
+        (an empty list also writes the Transcript-tab ending heading with no turns, matching
+        an empty capture)."""
         doc_id = name.rsplit("-gem_", 1)[1][:-3]
         lines = ["<!-- gemini modified: %s -->" % modified, "# Team sync", "",
                  "- **Date:** %s" % name[:10]]
         if event:
             lines.append("- **Calendar event:** %s" % event)
         lines += ["- **Google Doc:** https://docs.google.com/document/d/%s/edit" % doc_id, "",
-                  "## ", "", "Typed by an attendee.", "", "## **Team sync**", "",
-                  "### **Summary**", "", "Alice and Bob agreed on the plan.", "",
+                  "## ", "", "Gemini's short AI summary.", "", "## **Team sync**", ""]
+        if topic_heading:
+            lines += ["## **%s**" % topic_heading, ""]
+        lines += ["### **Summary**", "", "Alice and Bob agreed on the plan.", "",
                   "### **Next steps**", "", "* [Bob Example] Send the draft.", ""]
         if transcript:
             lines += ["## **Team sync \\- Transcript**", "", "### **00:00:05** {#00:00:05}", "",
                       "**Alice Example:** Hello Bob.", "", "**Bob Example:** Hi Alice.", "",
                       "### **Transcription ended after 00:01:00**", ""]
+        elif meet_lines == []:
+            lines += ["## **Team sync \\- Transcript**", "",
+                      "### **Transcription ended after 00:00:11**", ""]
         text = "\n".join(lines).rstrip() + "\n"
         if meet_lines is not None:
             section = ["## Meet transcript", "", "<!-- meet transcript: conferenceRecords/rec1/transcripts/t1 -->", ""]
