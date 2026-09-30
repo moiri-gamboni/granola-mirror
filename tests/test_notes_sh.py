@@ -548,20 +548,19 @@ class GeminiNotes(GranolaSandbox):
         self.assertTrue(os.path.exists(self.note_path(gemini_name)))
         self.assertNotIn("gemini-updated-at:", self.read(self.note_path(granola_name)))
 
-    def test_same_event_id_one_day_gap_pairs(self):
+    def test_same_event_id_adjacent_dates_do_not_pair(self):
         granola_name = "2026-08-01-team-sync-not_aaa.md"
         gemini_name = "2026-08-02-team-sync-gem_doc123.md"
         self.mirror_file(granola_name, event="evt123")
-        gemini = self.gemini_file(gemini_name, event="evt123")
+        self.gemini_file(gemini_name, event="evt123")
 
         r = self.notes_sh(self.mirror, *LOW)
 
         self.assertEqual(r.returncode, 0, r.stdout)
-        self.assertEqual(self.claude_call_count(), 1, r.stdout)
-        self.assertFalse(os.path.exists(self.note_path(gemini_name)))
-        self.assertIn(self.read(gemini).rstrip("\n"), self.last_claude_input())
-        self.assertIn("gemini-updated-at: 2026-09-30T12:00:00.000Z+m0",
-                      self.read(self.note_path(granola_name)))
+        self.assertEqual(self.claude_call_count(), 2, r.stdout)
+        self.assertTrue(os.path.exists(self.note_path(granola_name)))
+        self.assertTrue(os.path.exists(self.note_path(gemini_name)))
+        self.assertNotIn("gemini-updated-at:", self.read(self.note_path(granola_name)))
 
     def test_a_granola_note_without_a_partner_remains_current_without_a_gemini_key(self):
         self.mirror_file(self.GRANOLA)

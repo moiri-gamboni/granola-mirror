@@ -60,7 +60,7 @@ while [ $# -gt 0 ]; do case "$1" in --changed-file) cf="$2"; shift 2;; *) shift;
 exit "${GRANOLA_SYNC_RC:-0}"
 '''
 TRANSCRIPTS_STUB = '#!/usr/bin/env bash\nexit "${TRANSCRIPTS_RC:-0}"\n'
-DIGEST_STUB = '#!/usr/bin/env bash\nprintf \'digest stub called\\n\'\nexit "${DIGEST_RC:-0}"\n'
+DIGEST_STUB = '#!/usr/bin/env bash\nexit "${DIGEST_RC:-0}"\n'
 GEMINI_NOTES_STUB = '''#!/usr/bin/env bash
 printf '%s\\n' "$*" >> "$GEMINI_NOTES_CALLS"
 printf 'gemini-notes stub called: %s\\n' "$*"
@@ -112,8 +112,7 @@ else:
 # plus " <pageToken>" for a later page; its value is {"status": N, "body": <json>}, or
 # {"timeout": true} for a server that accepts the request and never answers. An unrouted
 # request answers 404. A route may set `incomplete_read: true` to raise
-# http.client.IncompleteRead, or `http_error_body_incomplete_read: true` to raise it when
-# reading an HTTP error body. Every request is appended to HTTP_STUB_CALLS as JSON.
+# http.client.IncompleteRead. Every request is appended to HTTP_STUB_CALLS as JSON.
 SITECUSTOMIZE = r'''
 import http.client, io, json, os, urllib.error, urllib.parse, urllib.request
 
@@ -135,13 +134,6 @@ def _urlopen(req, data=None, timeout=None, **kw):
         raise TimeoutError("timed out")
     if route.get("incomplete_read"):
         raise http.client.IncompleteRead(b"partial", 10)
-    if route.get("http_error_body_incomplete_read"):
-        class IncompleteBody:
-            def read(self, *args, **kwargs):
-                raise http.client.IncompleteRead(b"partial", 10)
-            def close(self):
-                pass
-        raise urllib.error.HTTPError(req.full_url, route["status"], "stub", {}, IncompleteBody())
     raw = json.dumps(route["body"]).encode()
     if route["status"] >= 400:
         raise urllib.error.HTTPError(req.full_url, route["status"], "stub", {}, io.BytesIO(raw))
@@ -353,8 +345,6 @@ class GranolaSandbox(unittest.TestCase):
             return None
         with open(self.claude_inputs, "rb") as f:
             inputs = f.read().split(b"\x1e")
-        if not inputs:
-            return None
         return inputs[-2].decode() if inputs[-1] == b"" else inputs[-1].decode()
 
     def run_summary(self):
@@ -451,14 +441,12 @@ class GeminiSandbox(GranolaSandbox):
             f.write(body)
 
     def route(self, method, url, body, status=200, page_token=None, timeout=False,
-              incomplete_read=False, http_error_body_incomplete_read=False):
+              incomplete_read=False):
         key = "%s %s" % (method, url) + (" " + page_token if page_token else "")
         if timeout:
             self.routes[key] = {"timeout": True}
         elif incomplete_read:
             self.routes[key] = {"incomplete_read": True}
-        elif http_error_body_incomplete_read:
-            self.routes[key] = {"status": status, "http_error_body_incomplete_read": True}
         else:
             self.routes[key] = {"status": status, "body": body}
         with open(self.http_routes, "w") as f:

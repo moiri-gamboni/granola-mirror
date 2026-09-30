@@ -196,7 +196,7 @@ held_alarms() {
     astate="$STATE/granola-held-alerted-$base"
     if [ ! -f "$astate" ]; then
       ntfy high "Granola note held" \
-        "$base has an unverifiable banner and is held, not regenerated. Resolve with: notes.sh <mirror-dir> <mirror-file> --force (or fix the banner)."
+        "$base has an unverifiable banner and is held, not regenerated. Resolve a Granola note with: notes.sh <mirror-dir> <mirror-file> --force. For a Gemini-only note, restore its banner or delete it."
       : > "$astate"
     fi
   done
@@ -279,26 +279,26 @@ pipeline() {
     gemini_stderr="$(cat "$gemini_stderr_file")"
     rm -f "$gemini_stderr_file"
 
-    if [ "$gemini_rc" -eq 1 ]; then
+    if [ "$gemini_rc" -ne 0 ] && [ "$gemini_rc" -ne 2 ]; then
       gemini_first="${gemini_stderr%%$'\n'*}"
+      [ -n "$gemini_first" ] || gemini_first="exit $gemini_rc"
       alert_once gemini high "Gemini notes fetch failed" \
         "$gemini_first; see journalctl -t granola-refresh"
-    elif [ "$gemini_rc" -eq 0 ] || [ "$gemini_rc" -eq 2 ]; then
+    else
       disarm gemini
-    fi
+      gemini_doc_ids="$(printf '%s\n' "$gemini_stderr" | sed -n 's/^gemini-notes: export failed \([^:]*\):.*/\1/p' | paste -sd' ' -)"
+      if [ -n "$gemini_doc_ids" ]; then
+        alert_once gemini-docs high "Gemini notes: some docs failed" "$gemini_doc_ids"
+      else
+        disarm gemini-docs
+      fi
 
-    gemini_doc_ids="$(printf '%s\n' "$gemini_stderr" | sed -n 's/^gemini-notes: export failed \([^:]*\):.*/\1/p' | paste -sd' ' -)"
-    if [ -n "$gemini_doc_ids" ]; then
-      alert_once gemini-docs high "Gemini notes: some docs failed" "$gemini_doc_ids"
-    else
-      disarm gemini-docs
-    fi
-
-    gemini_meet_line="$(printf '%s\n' "$gemini_stderr" | sed -n '/^gemini-notes: meet failed/p' | sed -n '1p')"
-    if [ -n "$gemini_meet_line" ]; then
-      alert_once gemini-meet high "Gemini notes: Meet transcripts failed" "$gemini_meet_line"
-    else
-      disarm gemini-meet
+      gemini_meet_line="$(printf '%s\n' "$gemini_stderr" | sed -n '/^gemini-notes: meet failed/p' | sed -n '1p')"
+      if [ -n "$gemini_meet_line" ]; then
+        alert_once gemini-meet high "Gemini notes: Meet transcripts failed" "$gemini_meet_line"
+      else
+        disarm gemini-meet
+      fi
     fi
   fi
 

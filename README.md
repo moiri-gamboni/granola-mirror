@@ -81,9 +81,9 @@ The workspace is `GRANOLA_WORKSPACE` (from the environment or `~/.config/granola
 
 Each run looks at every mirrored meeting dated on or after the notes floor (the date `notes.sh` first ran, stored in `~/.local/state/granola-notes-since`). For a Granola meeting, it spends a model call only when the meeting has ended (Granola has written a real summary, not its `_(no summary)_` placeholder), has a transcript, and the transcript was fetched against the meeting's current version. A transcript fetched mid-meeting would be partial, so a meeting still in progress waits, and a transcript that predates the latest edit waits for `granola-transcripts` to fetch it again. A transcript with no version stamp counts as current and is never fetched again.
 
-When a Gemini doc and a transcribed Granola file have the same Calendar event id and their dates are within one day of each other, one note uses both captures. The paired note keeps the Granola basename and records the Gemini version under `gemini-updated-at:`. A Gemini version is the doc's modified time plus the number of Meet transcript sections (`<time>+m<N>`), so a later Meet transcript regenerates the note.
+When a Gemini doc and a transcribed Granola file have the same Calendar event id and the same UTC filename date, one note uses both captures. The paired note keeps the Granola basename and records the Gemini version under `gemini-updated-at:`. A Gemini version is the doc's modified time plus the number of Meet transcript sections (`<time>+m<N>`), so a later Meet transcript regenerates the note.
 
-A Gemini doc with no qualifying transcribed Granola match gets its own note without a Granola settle gate, unless it is an empty capture. A doc with no transcript turns in its export and no entries in any Meet transcript sections is empty: it gets no note and does not pair. If a previously generated note becomes empty, the pipeline deletes it only when its banner and body hash still match, preserving edits. A non-empty Gemini-only doc gets its own note even when it has no transcript tab; its *Sources & reliability* section says there is no transcript and every claim rests on Gemini's AI notes. If a qualifying Granola transcript arrives later, its paired note supersedes the Gemini-only note; the pipeline deletes it only when its banner and body hash still match.
+A Gemini doc with no qualifying transcribed Granola match gets its own note without a Granola settle gate, unless it is an empty capture. A doc whose Meet transcript arrived with no entries and whose export has no transcript turns is an empty capture: it gets no note, does not pair, and its stale generated note is deleted only when its banner and body hash still match. A non-empty Gemini-only doc gets its own note even when it has no transcript tab; its *Sources & reliability* section says there is no transcript and every claim rests on Gemini's AI notes. If a qualifying Granola transcript arrives later, its paired note supersedes the Gemini-only note; the pipeline deletes it only when its banner and body hash still match.
 
 The note's banner records the meeting version it was generated from (`source-updated-at:`) and a hash of the note's body (`body-sha256:`). On each run:
 
@@ -138,27 +138,9 @@ Every trigger logs under one tag, `journalctl -t granola-refresh`, as long as th
 
 - **`granola folders | notes | get <id> | sync DIR`**: Granola's public API (summaries only; transcripts are not available through it). `sync` rewrites only meetings whose `updated_at` changed, keeps their transcript sections, and stays under Granola's 5 requests per second limit.
 - **`granola-transcripts sync DIR | get <uuid> | reformat DIR`**: transcripts through Granola's MCP. `sync` fetches only missing or outdated transcripts and backs off when Granola rate-limits it; `reformat` re-splits fetched transcripts locally. Exit 3: the OAuth refresh token expired.
-- **`gemini-notes sync DIR --remote REMOTE`**: mirrors Google Docs named "Notes by Gemini" and finished Meet transcripts for those docs. Exit 0: all current or written. Exit 1: the Drive query failed before writes, or the run crashed; a crash can leave work already written and may print a traceback. Exit 2: one or more exports or the Meet step failed; successful work remains. Progress is written to stdout:
+- **`gemini-notes sync DIR --remote REMOTE`**: mirrors Google Docs named "Notes by Gemini" and finished Meet transcripts for those docs. Exit 0: all current or written. Exit 1: the Drive query failed before writes, or the run crashed; a crash can leave work already written and may print a traceback. Exit 2: one or more exports or the Meet step failed; successful work remains. `--help` lists its progress and failure lines.
 
-  ```text
-  gemini-notes: query returned <N> docs
-  gemini-notes: exported <doc id> (<bytes> bytes)
-  gemini-notes: <W> written, <U> unchanged, <E> empty, <F> failed -> <DIR>
-  gemini-notes: meet: appended <transcript resource name> to <file basename> (<n> entries)
-  gemini-notes: meet: skipped <transcript resource name> (doc not mirrored)
-  gemini-notes: meet: <A> appended, <M> already mirrored, <S> skipped (doc not mirrored), <W> waiting
-  ```
-
-  The export, append and skipped-transcript lines repeat for each file or transcript. `<W> waiting` counts transcripts still being generated. Per-doc parse failures are reported as export failures. The last Meet summary is absent if token refresh or conference listing fails. Errors go to stderr, one line per failure:
-
-  ```text
-  gemini-notes: query failed: <reason>
-  gemini-notes: export failed <doc id>: <reason>
-  gemini-notes: meet failed: <reason>
-  gemini-notes: meet failed <conference id>: <reason>
-  ```
-
-- **`refresh.sh [--commit] [--digest] [mirror-dir]`**: the pipeline: summaries, Granola transcripts, the Gemini sync when `GEMINI_RCLONE_REMOTE` is set, the digest (with `--digest`), then notes. The notes step still runs if Gemini sync reports an error. With `--commit`, it commits the mirror, `meetings/gemini/`, generated notes matching `*-not_*.note.md` or `*-gem_*.note.md`, `updates/granola/` and the auto glossary tier (in whichever repository holds it), leaving anything else staged untouched. The Granola mirror and `meetings/gemini/` must share a repository. The mirror comes from the argument, then `GRANOLA_MIRROR`, then `~/.config/granola/env`.
+- **`refresh.sh [--commit] [--digest] [mirror-dir]`**: the pipeline: summaries, Granola transcripts, the Gemini sync when `GEMINI_RCLONE_REMOTE` is set, the digest (with `--digest`), then notes. The notes step still runs if Gemini sync reports an error. With `--commit`, it commits the mirror, `meetings/gemini/`, generated notes matching `*-not_*.note.md` or `*-gem_*.note.md`, `updates/granola/` and both glossary tiers (in whichever repository holds them), leaving anything else staged untouched. The Granola mirror and `meetings/gemini/` must share a repository. The mirror comes from the argument, then `GRANOLA_MIRROR`, then `~/.config/granola/env`.
 - **`notes.sh DIR [FILE...] [--since YYYY-MM-DD] [--force]`**: the notes step (see [How notes are kept in step with meetings](#how-notes-are-kept-in-step-with-meetings)). `notes.sh --hash NOTEFILE` prints a note's body hash.
 - **`webhook_receiver.py`**: verifies Granola's signed webhook events (`note.generated`, `note.edited`, `note.access_granted`, `note.regenerated`) and runs `refresh.sh --commit` for the whole mirror, coalescing bursts of events into one run.
 - **`migrate-banners.py MIRROR_DIR [--floor YYYY-MM-DD] [--dry-run]`**: a one-time upgrade for a deployment whose generated notes predate the version and hash fields in the banner. A new deployment never needs it.

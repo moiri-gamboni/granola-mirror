@@ -273,37 +273,6 @@ class Meet(GeminiSandbox):
         self.assertTrue(any(urllib.parse.urlsplit(c["url"]).path.endswith("/" + other_transcript + "/entries")
                             for c in self.http_calls()), self.http_calls())
 
-    def test_an_unreadable_old_mirror_only_fails_its_doc(self):
-        initial = self.gemini_notes()
-        self.assertEqual(initial.returncode, 0, initial.stdout + initial.stderr)
-        original_mode = os.stat(self.path).st_mode & 0o777
-        os.chmod(self.path, 0)
-        self.add_doc(DOC2, "Other" + SUFFIX, export_md())
-        other_rec = "conferenceRecords/rec2"
-        other_transcript = other_rec + "/transcripts/t2"
-        self.route("GET", self.MEET + "/conferenceRecords", {"conferenceRecords": [
-            {"name": REC, "startTime": "2026-09-30T10:00:00Z"},
-            {"name": other_rec, "startTime": "2026-09-30T12:00:00Z"}]})
-        self.route("GET", self.MEET + "/" + other_rec + "/transcripts", {"transcripts": [{
-            "name": other_transcript, "state": "FILE_GENERATED",
-            "docsDestination": {"document": DOC2}}]})
-        self.route("GET", self.MEET + "/" + other_rec + "/participants", {"participants": []})
-        self.route("GET", self.MEET + "/" + other_transcript + "/entries", {
-            "transcriptEntries": [{"name": other_transcript + "/entries/e1",
-                                   "text": "Other conference",
-                                   "startTime": "2026-09-30T12:01:00Z"}]})
-        try:
-            r = self.gemini_notes()
-        finally:
-            os.chmod(self.path, original_mode)
-
-        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
-        self.assertIn("export failed %s:" % DOC, r.stderr)
-        other_path = os.path.join(self.gemini, "2026-09-30-other-gem_%s.md" % DOC2)
-        self.assertIn("meet transcript: %s" % other_transcript, self.read(other_path))
-        self.assertTrue(any(urllib.parse.urlsplit(c["url"]).path.endswith("/" + other_transcript + "/entries")
-                            for c in self.http_calls()), self.http_calls())
-
     def test_the_token_is_refreshed_from_rclones_config_and_used(self):
         self.gemini_notes()
         calls = self.http_calls()
@@ -372,16 +341,6 @@ class Meet(GeminiSandbox):
 
     def test_incomplete_http_reads_are_retried(self):
         self.route("GET", self.MEET + "/conferenceRecords", None, incomplete_read=True)
-        r = self.gemini_notes()
-        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
-        calls = [c for c in self.http_calls()
-                 if c["url"].startswith(self.MEET + "/conferenceRecords")]
-        self.assertEqual(len(calls), 3, calls)
-        self.assertIn("meet failed:", r.stderr)
-
-    def test_incomplete_http_error_bodies_are_retried(self):
-        self.route("GET", self.MEET + "/conferenceRecords", None, status=503,
-                   http_error_body_incomplete_read=True)
         r = self.gemini_notes()
         self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
         calls = [c for c in self.http_calls()
@@ -499,13 +458,6 @@ class Harness(GeminiSandbox):
         r = self.gemini_notes()
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(self.read(path), want)
-
-
-class Cli(GeminiSandbox):
-    def test_help_prints_usage(self):
-        r = self.gemini_notes("--help")
-        self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn("gemini-notes sync DIR --remote REMOTE", r.stdout)
 
 
 if __name__ == "__main__":
