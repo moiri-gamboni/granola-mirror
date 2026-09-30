@@ -77,9 +77,6 @@ def atomic_write(path, text):
     try:
         with os.fdopen(fd, "w") as f:
             f.write(text)
-        umask = os.umask(0)
-        os.umask(umask)
-        os.chmod(tmp_path, 0o666 & ~umask)          # mkstemp's 0600 would outlive the replace
         os.replace(tmp_path, path)
     finally:
         if os.path.exists(tmp_path):
@@ -162,13 +159,8 @@ def http_json(req):
             with urllib.request.urlopen(req, timeout=60) as r:
                 return json.load(r)
         except urllib.error.HTTPError as e:
-            try:
-                body = one_line(e.read().decode(errors="replace"))
-            except (OSError, http.client.HTTPException) as read_error:
-                error, transient = "network error on %s: %r" % (url, read_error), True
-            else:
-                error = "HTTP %d on %s: %s" % (e.code, url, body)
-                transient = e.code == 429 or e.code >= 500
+            error = "HTTP %d on %s: %s" % (e.code, url, one_line(e.read().decode(errors="replace")))
+            transient = e.code == 429 or e.code >= 500
         except (OSError, http.client.HTTPException) as e:
             error, transient = "network error on %s: %r" % (url, e), True
         if not transient or attempt == 2:

@@ -155,6 +155,22 @@ class HeldAlarm(RefreshSandbox):
         second = [c for c in self.ntfy_calls() if "held" in c.lower()]
         self.assertEqual(len(first), len(second), "held alarm must fire once, not every run")
 
+    def test_a_held_gemini_only_note_page_names_its_recovery_options(self):
+        name = "2026-08-19-team-sync-gem_doc123.md"
+        self.gemini_file(name, event=None)
+        self.write_note(name, banner="<!-- auto-generated 2026-08-19 by notes.sh -->",
+                        body="# Old Gemini note\n\nNo readable version banner.\n")
+
+        r = self.run_refresh(self.mirror)
+
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertEqual(self.claude_call_count(), 0, r.stdout)
+        pages = [c for c in self.ntfy_calls() if "held" in c.lower()]
+        self.assertEqual(len(pages), 1, self.ntfy_calls())
+        self.assertIn("restore", pages[0])
+        self.assertIn("banner", pages[0])
+        self.assertIn("delete", pages[0])
+
     def test_a_resolved_hold_re_arms_the_alarm(self):
         name = "2026-08-19-standup-not_aaa.md"
         self.mirror_file(name)
@@ -310,10 +326,44 @@ class GeminiRefresh(RefreshSandbox):
         self.assertIn(query_err, second.stdout)
         self.assertIn("granola-refresh: notes", second.stdout)
         self.assertEqual(len(self.pages("Gemini notes: some docs failed")), 1,
-                         "no export-failed lines disarm the document alarm")
+                         "an exit outside 0 and 2 must leave the document alarm armed")
         self.assertEqual(len(self.pages("Gemini notes fetch failed")), 1, self.ntfy_calls())
-        self.assertFalse(os.path.exists(os.path.join(self.state, "granola-alert-gemini-docs")))
+        self.assertTrue(os.path.exists(os.path.join(self.state, "granola-alert-gemini-docs")))
         self.assertTrue(os.path.exists(os.path.join(self.state, "granola-alert-gemini")))
+
+    def test_unexpected_exit_pages_fetch_and_preserves_substep_alarms(self):
+        self.mirror_file("2026-08-19-standup-not_aaa.md")
+        substep_errors = ("gemini-notes: export failed doc-aaa: missing\n"
+                          "gemini-notes: meet failed rec-123: unavailable")
+        expected = self.run_refresh(self.mirror, GEMINI_RCLONE_REMOTE="drive-test:",
+                                    GEMINI_NOTES_RC="2", GEMINI_NOTES_STDERR=substep_errors)
+        self.assertEqual(expected.returncode, 0, expected.stdout)
+        self.assertEqual(len(self.pages("Gemini notes: some docs failed")), 1, self.ntfy_calls())
+        self.assertEqual(len(self.pages("Gemini notes: Meet transcripts failed")), 1,
+                         self.ntfy_calls())
+        self.assertEqual(self.pages("Gemini notes fetch failed"), [])
+
+        unexpected = self.run_refresh(self.mirror, GEMINI_RCLONE_REMOTE="drive-test:",
+                                      GEMINI_NOTES_RC="127", GEMINI_NOTES_STDERR="")
+
+        self.assertEqual(unexpected.returncode, 0, unexpected.stdout)
+        self.assertIn("granola-refresh: notes", unexpected.stdout)
+        fetch_pages = self.pages("Gemini notes fetch failed")
+        self.assertEqual(len(fetch_pages), 1, self.ntfy_calls())
+        self.assertIn("exit 127", fetch_pages[0])
+        self.assertTrue(os.path.exists(os.path.join(self.state, "granola-alert-gemini")))
+        self.assertTrue(os.path.exists(os.path.join(self.state, "granola-alert-gemini-docs")))
+        self.assertTrue(os.path.exists(os.path.join(self.state, "granola-alert-gemini-meet")))
+        self.assertEqual(len(self.pages("Gemini notes: some docs failed")), 1, self.ntfy_calls())
+        self.assertEqual(len(self.pages("Gemini notes: Meet transcripts failed")), 1,
+                         self.ntfy_calls())
+
+        recovered = self.run_refresh(self.mirror, GEMINI_RCLONE_REMOTE="drive-test:",
+                                     GEMINI_NOTES_RC="0", GEMINI_NOTES_STDERR="")
+
+        self.assertEqual(recovered.returncode, 0, recovered.stdout)
+        for alarm in ("gemini", "gemini-docs", "gemini-meet"):
+            self.assertFalse(os.path.exists(os.path.join(self.state, "granola-alert-" + alarm)))
 
     def test_meet_failure_pages_the_first_line_and_clears_when_absent(self):
         self.mirror_file("2026-08-19-standup-not_aaa.md")
