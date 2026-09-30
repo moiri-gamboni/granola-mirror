@@ -1,0 +1,264 @@
+#!/usr/bin/env python3
+"""gemini-notes — mirror Google Meet "Notes by Gemini" docs, with Meet's structured transcripts.
+
+  gemini-notes sync DIR --remote REMOTE
+
+Finds every Google Doc named "… - Notes by Gemini" that the rclone Drive remote REMOTE
+(for example `gdrive:`) can read, and writes each as DIR/<created date>-<slug>-gem_<doc id>.md:
+a header (Drive's modifiedTime, the title, the date, the Google Calendar event id from the
+notes tab's Attachments line, the doc link), then the doc's Markdown export, every tab, with
+inline base64 images replaced by a placeholder line. A doc whose modifiedTime is unchanged is
+not exported again; a renamed doc keeps its file.
+
+Then, through the Google Meet REST API, it lists every conference the remote's account joined
+and appends each finished transcript whose notes doc is mirrored here as a `## Meet transcript`
+section: one `[HH:MM:SS] **Name:** text` line per entry, the time elapsed since the conference
+started, speakers named from the conference's participants. A section is fetched once and
+carried over when its doc is exported again, so the mirror keeps it after Google deletes the
+entries (30 days after the meeting). The access token is refreshed in-process from the refresh
+token, client id and secret rclone holds for REMOTE; rclone's config is only read.
+
+Exit 0 when everything was current or written; 1 when the Drive query failed (nothing
+written); 2 when some docs or the Meet step failed (the rest written). Progress goes to stdout;
+stderr carries one line per failure:
+  gemini-notes: query failed: <reason>
+  gemini-notes: export failed <doc id>: <reason>
+  gemini-notes: meet failed: <reason>                  (the token or the conference list)
+  gemini-notes: meet failed <conference id>: <reason>
+"""
+import argparse, base64, datetime, glob, json, os, re, subprocess, sys, tempfile, time
+import urllib.error, urllib.parse, urllib.request
+
+QUERY = ("name contains 'Notes by Gemini' and mimeType = 'application/vnd.google-apps.document'"
+         " and trashed = false")
+NAME_SUFFIX = " - Notes by Gemini"
+RCLONE_TIMEOUT = 600          # a hung rclone call must not hold the pipeline lock for hours
+TOKEN_URL = "https://oauth2.googleapis.com/token"
+MEET = "https://meet.googleapis.com/v2"
+IMAGE_PLACEHOLDER = "[inline image omitted; see the Google Doc]"
+MODIFIED_RE = re.compile(r"<!-- gemini modified: (\S+) -->")
+ATTACHMENTS_EID_RE = re.compile(r"^Attachments .*?calendar\.google\.com/calendar/event\?eid=([^)&\s]+)",
+                                re.M)
+DATA_URI_RE = re.compile(r"data:[a-z]+/[a-z0-9.+-]+[;,]", re.I)
+MEET_SECTION = "\n## Meet transcript\n\n<!-- meet transcript: "
+
+
+def fail(line):
+    print("gemini-notes: " + line, file=sys.stderr)
+
+
+def one_line(text, limit=500):
+    return " ".join(text.split())[:limit]
+
+
+def slug(s):
+    # the same slug as granola's mirror files
+    return (re.sub(r"[^a-z0-9]+", "-", (s or "").lower()).strip("-") or "note")[:60]
+
+
+def rclone(*args):
+    """Runs rclone; returns stdout, or raises RuntimeError with the first line of its stderr."""
+    try:
+        r = subprocess.run(("rclone",) + args, capture_output=True, text=True, timeout=RCLONE_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("timeout after %ds" % RCLONE_TIMEOUT)
+    if r.returncode != 0:
+        raise RuntimeError((r.stderr.strip().splitlines() or ["rclone exited %d" % r.returncode])[0])
+    return r.stdout
+
+
+# --- the Drive docs --------------------------------------------------------------------
+
+def event_id(export):
+    """The Calendar event id from the notes tab's Attachments line: its eid is base64 (either
+    alphabet, unpadded, maybe percent-encoded) of "<event id> <organizer calendar>". A link
+    typed into another tab never counts."""
+    m = ATTACHMENTS_EID_RE.search(export)
+    if not m:
+        return None
+    e = urllib.parse.unquote(m.group(1)).rstrip("=").replace("-", "+").replace("_", "/")
+    return base64.b64decode(e + "=" * (-len(e) % 4)).decode().split(" ")[0]
+
+
+def mirror_text(doc, export, old):
+    head = ["<!-- gemini modified: %s -->" % doc["modifiedTime"], "# " + doc["name"].removesuffix(NAME_SUFFIX),
+            "", "- **Date:** " + doc["createdTime"][:10]]
+    event = event_id(export)
+    if event:
+        head.append("- **Calendar event:** " + event)
+    head += ["- **Google Doc:** https://docs.google.com/document/d/%s/edit" % doc["id"], ""]
+    body = "\n".join(IMAGE_PLACEHOLDER if DATA_URI_RE.search(l) else l for l in export.splitlines())
+    i = old.find(MEET_SECTION)
+    meet = old[i:] if i != -1 else ""
+    return "\n".join(head) + "\n" + body.rstrip() + "\n" + meet
+
+
+def existing_files(d):
+    return {os.path.basename(p).split("-gem_", 1)[1][:-3]: p for p in glob.glob(os.path.join(d, "*-gem_*.md"))}
+
+
+def sync_docs(d, remote, docs):
+    files = existing_files(d)
+    written = unchanged = failed = 0
+    for doc in docs:
+        path = files.get(doc["id"]) or os.path.join(
+            d, "%s-%s-gem_%s.md" % (doc["createdTime"][:10], slug(doc["name"].removesuffix(NAME_SUFFIX)), doc["id"]))
+        old = open(path).read() if os.path.exists(path) else ""
+        m = MODIFIED_RE.match(old)
+        if m and m.group(1) == doc["modifiedTime"]:
+            unchanged += 1
+            continue
+        with tempfile.TemporaryDirectory() as tmp:
+            out = os.path.join(tmp, "export.md")
+            try:
+                rclone("backend", "copyid", remote, doc["id"], out, "--drive-export-formats", "md")
+            except RuntimeError as e:
+                # skip this doc: the others still land, and the exit code reports it
+                fail("export failed %s: %s" % (doc["id"], e))
+                failed += 1
+                continue
+            export = open(out).read()
+        print("gemini-notes: exported %s (%d bytes)" % (doc["id"], len(export.encode())))
+        with open(path, "w") as f:
+            f.write(mirror_text(doc, export, old))
+        written += 1
+    print("gemini-notes: %d written, %d unchanged, %d failed -> %s" % (written, unchanged, failed, d))
+    return failed == 0
+
+
+# --- the Meet transcripts --------------------------------------------------------------
+
+class MeetError(Exception):
+    pass
+
+
+def http_json(req):
+    """One Google API call; transient failures (429, 5xx, network) are retried twice, then
+    raised as MeetError with the status and raw body."""
+    url = req.full_url.split("?")[0]
+    for attempt in range(3):
+        try:
+            with urllib.request.urlopen(req, timeout=60) as r:
+                return json.load(r)
+        except urllib.error.HTTPError as e:
+            error = "HTTP %d on %s: %s" % (e.code, url, one_line(e.read().decode(errors="replace")))
+            transient = e.code == 429 or e.code >= 500
+        except OSError as e:          # URLError, and timeouts or resets while reading the reply
+            error, transient = "network error on %s: %r" % (url, e), True
+        if not transient or attempt == 2:
+            raise MeetError(error)
+        time.sleep(2 ** attempt)
+
+
+def access_token(remote):
+    """A fresh access token for the rclone remote's account, never written back: rclone keeps
+    managing its own token."""
+    try:
+        conf = json.loads(rclone("config", "dump"))[remote.rstrip(":")]
+        refresh = json.loads(conf["token"])["refresh_token"]
+        form = {"grant_type": "refresh_token", "refresh_token": refresh,
+                "client_id": conf["client_id"], "client_secret": conf["client_secret"]}
+    except (RuntimeError, KeyError, ValueError) as e:
+        raise MeetError("no refresh token for %s in rclone's config: %r" % (remote, e))
+    req = urllib.request.Request(TOKEN_URL, data=urllib.parse.urlencode(form).encode(),
+                                 headers={"Content-Type": "application/x-www-form-urlencoded"})
+    return http_json(req)["access_token"]
+
+
+def meet_list(token, path, key):
+    items, page = [], None
+    while True:
+        q = {"pageSize": 100, **({"pageToken": page} if page else {})}
+        req = urllib.request.Request("%s/%s?%s" % (MEET, path, urllib.parse.urlencode(q)),
+                                     headers={"Authorization": "Bearer " + token})
+        d = http_json(req)
+        items += d.get(key, [])
+        page = d.get("nextPageToken")
+        if not page:
+            return items
+
+
+def display_name(p):
+    for kind in ("signedinUser", "anonymousUser", "phoneUser"):
+        if p.get(kind, {}).get("displayName"):
+            return p[kind]["displayName"]
+    return "Unknown participant"
+
+
+def meet_section(transcript_name, record_start, entries, names):
+    lines = ["## Meet transcript", "", "<!-- meet transcript: %s -->" % transcript_name, ""]
+    for e in entries:
+        s = max(0, int((datetime.datetime.fromisoformat(e["startTime"]) - record_start).total_seconds()))
+        lines.append("[%02d:%02d:%02d] **%s:** %s" % (s // 3600, s // 60 % 60, s % 60,
+                                                    names.get(e.get("participant"), "Unknown participant"),
+                                                    " ".join(e.get("text", "").split())))
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def sync_meet(d, remote):
+    token = access_token(remote)
+    records = meet_list(token, "conferenceRecords", "conferenceRecords")
+    files = existing_files(d)
+    appended = mirrored = unmirrored = 0
+    ok = True
+    for rec in sorted(records, key=lambda r: r["startTime"]):
+        try:
+            pending = []
+            for t in sorted(meet_list(token, rec["name"] + "/transcripts", "transcripts"),
+                            key=lambda t: t.get("startTime", "")):
+                if t.get("state") != "FILE_GENERATED":
+                    continue                        # still being written; the next run takes it
+                path = files.get(t.get("docsDestination", {}).get("document"))
+                if not path:
+                    unmirrored += 1
+                elif "<!-- meet transcript: %s -->" % t["name"] in open(path).read():
+                    mirrored += 1
+                else:
+                    pending.append((t, path))
+            if not pending:
+                continue
+            names = {p["name"]: display_name(p) for p in meet_list(token, rec["name"] + "/participants", "participants")}
+            start = datetime.datetime.fromisoformat(rec["startTime"])
+            for t, path in pending:
+                entries = meet_list(token, t["name"] + "/entries", "transcriptEntries")
+                with open(path, "a") as f:
+                    f.write("\n" + meet_section(t["name"], start, entries, names))
+                print("gemini-notes: meet: appended %s to %s (%d entries)"
+                      % (t["name"], os.path.basename(path), len(entries)))
+                appended += 1
+        except (MeetError, KeyError, ValueError) as e:
+            # skip this conference: the others still land, and it is retried next run
+            fail("meet failed %s: %s" % (rec["name"].split("/")[-1], e))
+            ok = False
+    print("gemini-notes: meet: %d appended, %d already mirrored, %d skipped (doc not mirrored)"
+          % (appended, mirrored, unmirrored))
+    return ok
+
+
+def cmd_sync(a):
+    os.makedirs(a.dir, exist_ok=True)
+    try:
+        docs = json.loads(rclone("backend", "query", a.remote, QUERY)) or []   # no match prints null
+    except RuntimeError as e:
+        fail("query failed: %s" % e)
+        return 1
+    print("gemini-notes: query returned %d docs" % len(docs))
+    ok = sync_docs(a.dir, a.remote, docs)
+    try:
+        ok = sync_meet(a.dir, a.remote) and ok
+    except (MeetError, KeyError, ValueError) as e:
+        # the docs are written; the Meet step alone failed and is retried next run
+        fail("meet failed: %s" % e)
+        ok = False
+    return 0 if ok else 2
+
+
+p = argparse.ArgumentParser(prog="gemini-notes", description=__doc__,
+                            formatter_class=argparse.RawDescriptionHelpFormatter)
+sub = p.add_subparsers(dest="cmd", required=True)
+ps = sub.add_parser("sync")
+ps.add_argument("dir")
+ps.add_argument("--remote", required=True)
+ps.set_defaults(fn=cmd_sync)
+args = p.parse_args()
+sys.exit(args.fn(args))
