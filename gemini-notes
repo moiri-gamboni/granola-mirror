@@ -18,15 +18,18 @@ carried over when its doc is exported again, so the mirror keeps it after Google
 entries (30 days after the meeting). The access token is refreshed in-process from the refresh
 token, client id and secret rclone holds for REMOTE; rclone's config is only read.
 
-Exit 0 when everything was current or written; 1 when the Drive query failed (nothing
-written); 2 when some docs or the Meet step failed (the rest written). Progress goes to stdout;
-stderr carries one line per failure:
+Exit 0 when everything was current or written; 1 when the Drive query failed, or the run
+crashed (see the traceback); 2 when some docs or the Meet step failed (the rest written).
+Progress goes to stdout, including one line for each transcript skipped because its doc is not
+mirrored (with its name, doc id and conference start time), and a Meet summary with appended,
+already mirrored, skipped and waiting counts; stderr carries one line per failure:
   gemini-notes: query failed: <reason>
   gemini-notes: export failed <doc id>: <reason>
   gemini-notes: meet failed: <reason>                  (the token or the conference list)
   gemini-notes: meet failed <conference id>: <reason>
 """
 import argparse, base64, datetime, glob, json, os, re, subprocess, sys, tempfile, time
+import http.client
 import urllib.error, urllib.parse, urllib.request
 
 QUERY = ("name contains 'Notes by Gemini' and mimeType = 'application/vnd.google-apps.document'"
@@ -67,6 +70,22 @@ def rclone(*args):
     return r.stdout
 
 
+def atomic_write(path, text):
+    """Replace a mirror file only after its complete contents have been written."""
+    directory = os.path.dirname(path) or "."
+    fd, tmp_path = tempfile.mkstemp(prefix=".gemini-", suffix=".tmp", dir=directory)
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(text)
+        umask = os.umask(0)
+        os.umask(umask)
+        os.chmod(tmp_path, 0o666 & ~umask)          # mkstemp's 0600 would outlive the replace
+        os.replace(tmp_path, path)
+    finally:
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+
+
 # --- the Drive docs --------------------------------------------------------------------
 
 def event_id(export):
@@ -103,24 +122,25 @@ def sync_docs(d, remote, docs):
     for doc in docs:
         path = files.get(doc["id"]) or os.path.join(
             d, "%s-%s-gem_%s.md" % (doc["createdTime"][:10], slug(doc["name"].removesuffix(NAME_SUFFIX)), doc["id"]))
-        old = open(path).read() if os.path.exists(path) else ""
-        m = MODIFIED_RE.match(old)
-        if m and m.group(1) == doc["modifiedTime"]:
-            unchanged += 1
-            continue
-        with tempfile.TemporaryDirectory() as tmp:
-            out = os.path.join(tmp, "export.md")
-            try:
-                rclone("backend", "copyid", remote, doc["id"], out, "--drive-export-formats", "md")
-            except RuntimeError as e:
-                # skip this doc: the others still land, and the exit code reports it
-                fail("export failed %s: %s" % (doc["id"], e))
-                failed += 1
+        try:
+            old = open(path).read() if os.path.exists(path) else ""
+            m = MODIFIED_RE.match(old)
+            if m and m.group(1) == doc["modifiedTime"]:
+                unchanged += 1
                 continue
-            export = open(out).read()
+            with tempfile.TemporaryDirectory() as tmp:
+                out = os.path.join(tmp, "export.md")
+                rclone("backend", "copyid", remote, doc["id"], out, "--drive-export-formats", "md")
+                with open(out) as f:
+                    export = f.read()
+                text = mirror_text(doc, export, old)
+                atomic_write(path, text)
+        except (RuntimeError, ValueError, OSError) as e:
+            # skip this doc: the others still land, and the exit code reports it
+            fail("export failed %s: %s" % (doc["id"], e))
+            failed += 1
+            continue
         print("gemini-notes: exported %s (%d bytes)" % (doc["id"], len(export.encode())))
-        with open(path, "w") as f:
-            f.write(mirror_text(doc, export, old))
         written += 1
     print("gemini-notes: %d written, %d unchanged, %d failed -> %s" % (written, unchanged, failed, d))
     return failed == 0
@@ -133,17 +153,23 @@ class MeetError(Exception):
 
 
 def http_json(req):
-    """One Google API call; transient failures (429, 5xx, network) are retried twice, then
-    raised as MeetError with the status and raw body."""
+    """One Google API call; transient failures (429, 5xx, network) are retried twice. HTTP
+    errors are raised as MeetError with the status and first 500 body characters on one line;
+    network failures include their exception details."""
     url = req.full_url.split("?")[0]
     for attempt in range(3):
         try:
             with urllib.request.urlopen(req, timeout=60) as r:
                 return json.load(r)
         except urllib.error.HTTPError as e:
-            error = "HTTP %d on %s: %s" % (e.code, url, one_line(e.read().decode(errors="replace")))
-            transient = e.code == 429 or e.code >= 500
-        except OSError as e:          # URLError, and timeouts or resets while reading the reply
+            try:
+                body = one_line(e.read().decode(errors="replace"))
+            except (OSError, http.client.HTTPException) as read_error:
+                error, transient = "network error on %s: %r" % (url, read_error), True
+            else:
+                error = "HTTP %d on %s: %s" % (e.code, url, body)
+                transient = e.code == 429 or e.code >= 500
+        except (OSError, http.client.HTTPException) as e:
             error, transient = "network error on %s: %r" % (url, e), True
         if not transient or attempt == 2:
             raise MeetError(error)
@@ -159,7 +185,8 @@ def access_token(remote):
         form = {"grant_type": "refresh_token", "refresh_token": refresh,
                 "client_id": conf["client_id"], "client_secret": conf["client_secret"]}
     except (RuntimeError, KeyError, ValueError) as e:
-        raise MeetError("no refresh token for %s in rclone's config: %r" % (remote, e))
+        raise MeetError("cannot read the OAuth client and refresh token for %s from rclone's config: %r"
+                        % (remote, e))
     req = urllib.request.Request(TOKEN_URL, data=urllib.parse.urlencode(form).encode(),
                                  headers={"Content-Type": "application/x-www-form-urlencoded"})
     return http_json(req)["access_token"]
@@ -199,7 +226,7 @@ def sync_meet(d, remote):
     token = access_token(remote)
     records = meet_list(token, "conferenceRecords", "conferenceRecords")
     files = existing_files(d)
-    appended = mirrored = unmirrored = 0
+    appended = mirrored = unmirrored = waiting = 0
     ok = True
     for rec in sorted(records, key=lambda r: r["startTime"]):
         try:
@@ -207,10 +234,13 @@ def sync_meet(d, remote):
             for t in sorted(meet_list(token, rec["name"] + "/transcripts", "transcripts"),
                             key=lambda t: t.get("startTime", "")):
                 if t.get("state") != "FILE_GENERATED":
+                    waiting += 1
                     continue                        # still being written; the next run takes it
                 path = files.get(t.get("docsDestination", {}).get("document"))
                 if not path:
                     unmirrored += 1
+                    print("gemini-notes: meet: skipped %s (doc %s not mirrored; conference started %s)"
+                          % (t["name"], t.get("docsDestination", {}).get("document"), rec["startTime"]))
                 elif "<!-- meet transcript: %s -->" % t["name"] in open(path).read():
                     mirrored += 1
                 else:
@@ -221,17 +251,18 @@ def sync_meet(d, remote):
             start = datetime.datetime.fromisoformat(rec["startTime"])
             for t, path in pending:
                 entries = meet_list(token, t["name"] + "/entries", "transcriptEntries")
-                with open(path, "a") as f:
-                    f.write("\n" + meet_section(t["name"], start, entries, names))
+                with open(path) as f:
+                    old = f.read()
+                atomic_write(path, old + "\n" + meet_section(t["name"], start, entries, names))
                 print("gemini-notes: meet: appended %s to %s (%d entries)"
                       % (t["name"], os.path.basename(path), len(entries)))
                 appended += 1
-        except (MeetError, KeyError, ValueError) as e:
+        except (MeetError, KeyError, ValueError, OSError) as e:
             # skip this conference: the others still land, and it is retried next run
             fail("meet failed %s: %s" % (rec["name"].split("/")[-1], e))
             ok = False
-    print("gemini-notes: meet: %d appended, %d already mirrored, %d skipped (doc not mirrored)"
-          % (appended, mirrored, unmirrored))
+    print("gemini-notes: meet: %d appended, %d already mirrored, %d skipped (doc not mirrored), %d waiting"
+          % (appended, mirrored, unmirrored, waiting))
     return ok
 
 

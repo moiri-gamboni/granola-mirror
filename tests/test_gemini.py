@@ -239,6 +239,71 @@ class Meet(GeminiSandbox):
                          "[01:14:23] **Caller 1:** Joining by phone.\n")
         self.assertIn("**Alice Example:** Hello Bob.", text, "the doc export stays above it")
 
+    def test_a_malformed_event_id_keeps_the_old_file_and_meet_continues(self):
+        initial = self.gemini_notes()
+        self.assertEqual(initial.returncode, 0, initial.stdout + initial.stderr)
+        with open(self.path, "rb") as f:
+            before = f.read()
+
+        self.add_doc(DOC, "Sync" + SUFFIX, export_md(attach_eid="abcde"),
+                     modified="2026-10-01T09:00:00.000Z")
+        self.add_doc(DOC2, "Other" + SUFFIX, export_md())
+        other_rec = "conferenceRecords/rec2"
+        other_transcript = other_rec + "/transcripts/t2"
+        self.route("GET", self.MEET + "/conferenceRecords", {"conferenceRecords": [
+            {"name": REC, "startTime": "2026-09-30T10:00:00Z"},
+            {"name": other_rec, "startTime": "2026-09-30T12:00:00Z"}]})
+        self.route("GET", self.MEET + "/" + other_rec + "/transcripts", {"transcripts": [{
+            "name": other_transcript, "state": "FILE_GENERATED",
+            "docsDestination": {"document": DOC2}}]})
+        self.route("GET", self.MEET + "/" + other_rec + "/participants", {"participants": []})
+        self.route("GET", self.MEET + "/" + other_transcript + "/entries", {
+            "transcriptEntries": [{"name": other_transcript + "/entries/e1",
+                                   "text": "Other conference",
+                                   "startTime": "2026-09-30T12:01:00Z"}]})
+
+        r = self.gemini_notes()
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("export failed %s:" % DOC, r.stderr)
+        self.assertNotIn("query failed", r.stderr)
+        with open(self.path, "rb") as f:
+            self.assertEqual(f.read(), before)
+        other_path = os.path.join(self.gemini, "2026-09-30-other-gem_%s.md" % DOC2)
+        self.assertIn("meet transcript: %s" % other_transcript, self.read(other_path))
+        self.assertTrue(any(urllib.parse.urlsplit(c["url"]).path.endswith("/" + other_transcript + "/entries")
+                            for c in self.http_calls()), self.http_calls())
+
+    def test_an_unreadable_old_mirror_only_fails_its_doc(self):
+        initial = self.gemini_notes()
+        self.assertEqual(initial.returncode, 0, initial.stdout + initial.stderr)
+        original_mode = os.stat(self.path).st_mode & 0o777
+        os.chmod(self.path, 0)
+        self.add_doc(DOC2, "Other" + SUFFIX, export_md())
+        other_rec = "conferenceRecords/rec2"
+        other_transcript = other_rec + "/transcripts/t2"
+        self.route("GET", self.MEET + "/conferenceRecords", {"conferenceRecords": [
+            {"name": REC, "startTime": "2026-09-30T10:00:00Z"},
+            {"name": other_rec, "startTime": "2026-09-30T12:00:00Z"}]})
+        self.route("GET", self.MEET + "/" + other_rec + "/transcripts", {"transcripts": [{
+            "name": other_transcript, "state": "FILE_GENERATED",
+            "docsDestination": {"document": DOC2}}]})
+        self.route("GET", self.MEET + "/" + other_rec + "/participants", {"participants": []})
+        self.route("GET", self.MEET + "/" + other_transcript + "/entries", {
+            "transcriptEntries": [{"name": other_transcript + "/entries/e1",
+                                   "text": "Other conference",
+                                   "startTime": "2026-09-30T12:01:00Z"}]})
+        try:
+            r = self.gemini_notes()
+        finally:
+            os.chmod(self.path, original_mode)
+
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("export failed %s:" % DOC, r.stderr)
+        other_path = os.path.join(self.gemini, "2026-09-30-other-gem_%s.md" % DOC2)
+        self.assertIn("meet transcript: %s" % other_transcript, self.read(other_path))
+        self.assertTrue(any(urllib.parse.urlsplit(c["url"]).path.endswith("/" + other_transcript + "/entries")
+                            for c in self.http_calls()), self.http_calls())
+
     def test_the_token_is_refreshed_from_rclones_config_and_used(self):
         self.gemini_notes()
         calls = self.http_calls()
@@ -286,6 +351,13 @@ class Meet(GeminiSandbox):
         self.assertEqual(self.entries_calls(), [])
         self.assertNotIn("Meet transcript", self.read(self.path))
         self.assertIn("1 skipped (doc not mirrored)", r.stdout)
+        lines = [line for line in r.stdout.splitlines()
+                 if line.startswith("gemini-notes: meet: skipped ")]
+        self.assertEqual(len(lines), 1, r.stdout)
+        line = lines[0]
+        self.assertIn(TRANSCRIPT, line)
+        self.assertIn("1NotShared", line)
+        self.assertIn("2026-09-30T10:00:00.250000Z", line)
 
     def test_a_transcript_still_being_generated_waits(self):
         self.route("GET", self.MEET + "/" + REC + "/transcripts", {"transcripts": [{
@@ -295,6 +367,39 @@ class Meet(GeminiSandbox):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(self.entries_calls(), [])
         self.assertNotIn("Meet transcript", self.read(self.path))
+        self.assertIn("0 appended, 0 already mirrored, 0 skipped (doc not mirrored), 1 waiting",
+                      r.stdout)
+
+    def test_incomplete_http_reads_are_retried(self):
+        self.route("GET", self.MEET + "/conferenceRecords", None, incomplete_read=True)
+        r = self.gemini_notes()
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        calls = [c for c in self.http_calls()
+                 if c["url"].startswith(self.MEET + "/conferenceRecords")]
+        self.assertEqual(len(calls), 3, calls)
+        self.assertIn("meet failed:", r.stderr)
+
+    def test_incomplete_http_error_bodies_are_retried(self):
+        self.route("GET", self.MEET + "/conferenceRecords", None, status=503,
+                   http_error_body_incomplete_read=True)
+        r = self.gemini_notes()
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        calls = [c for c in self.http_calls()
+                 if c["url"].startswith(self.MEET + "/conferenceRecords")]
+        self.assertEqual(len(calls), 3, calls)
+        self.assertIn("meet failed:", r.stderr)
+
+    def test_an_unreadable_rclone_auth_config_is_described(self):
+        config_path = os.path.join(self.rclone_dir, "config.json")
+        with open(config_path) as f:
+            config = json.load(f)
+        del config["gdrive"]["client_secret"]
+        with open(config_path, "w") as f:
+            json.dump(config, f)
+        r = self.gemini_notes()
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("cannot read the OAuth client and refresh token for gdrive:", r.stderr)
+        self.assertIn("from rclone's config", r.stderr)
 
     def test_a_transcript_with_no_entries_is_marked_without_lines(self):
         self.route("GET", self.MEET + "/" + TRANSCRIPT + "/entries", {})
