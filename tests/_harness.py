@@ -59,7 +59,15 @@ while [ $# -gt 0 ]; do case "$1" in --changed-file) cf="$2"; shift 2;; *) shift;
 exit "${GRANOLA_SYNC_RC:-0}"
 '''
 TRANSCRIPTS_STUB = '#!/usr/bin/env bash\nexit "${TRANSCRIPTS_RC:-0}"\n'
-DIGEST_STUB = '#!/usr/bin/env bash\nexit "${DIGEST_RC:-0}"\n'
+DIGEST_STUB = '#!/usr/bin/env bash\nprintf \'digest stub called\\n\'\nexit "${DIGEST_RC:-0}"\n'
+GEMINI_NOTES_STUB = '''#!/usr/bin/env bash
+printf '%s\\n' "$*" >> "$GEMINI_NOTES_CALLS"
+printf 'gemini-notes stub called: %s\\n' "$*"
+if [ -n "${GEMINI_NOTES_STDERR:-}" ]; then
+  printf '%s\\n' "$GEMINI_NOTES_STDERR" >&2
+fi
+exit "${GEMINI_NOTES_RC:-0}"
+'''
 
 CURL_STUB = '''#!/usr/bin/env bash
 printf '%s\\n' "$*" >> "$SANDBOX_NTFY_LOG"
@@ -161,6 +169,7 @@ class GranolaSandbox(unittest.TestCase):
         self.claude_calls = os.path.join(self.tmp, "claude-calls")
         self.claude_argv = os.path.join(self.tmp, "claude-argv")
         self.ntfy_log = os.path.join(self.tmp, "ntfy")
+        self.gemini_notes_calls = os.path.join(self.tmp, "gemini-notes-calls")
 
     # --- env / invocation -------------------------------------------------
     def env(self, **over):
@@ -169,8 +178,10 @@ class GranolaSandbox(unittest.TestCase):
                  PATH=self.bin + os.pathsep + os.environ["PATH"],
                  CLAUDE_CALLS=self.claude_calls,
                  CLAUDE_ARGV=self.claude_argv,
-                 SANDBOX_NTFY_LOG=self.ntfy_log)
+                 SANDBOX_NTFY_LOG=self.ntfy_log,
+                 GEMINI_NOTES_CALLS=self.gemini_notes_calls)
         e.pop("GRANOLA_LOCK_HELD", None)
+        e.pop("GEMINI_RCLONE_REMOTE", None)
         e.update(over)
         return e
 
@@ -194,11 +205,18 @@ class GranolaSandbox(unittest.TestCase):
                     os.path.join(skills, "SKILL.md"))
         write_exec(os.path.join(clone, "granola"), GRANOLA_STUB)
         write_exec(os.path.join(clone, "granola-transcripts"), TRANSCRIPTS_STUB)
+        write_exec(os.path.join(clone, "gemini-notes"), GEMINI_NOTES_STUB)
         self.refresh = os.path.join(clone, "refresh.sh")
         return self.refresh
 
     def enable_digest_stub(self):
         write_exec(os.path.join(self.bin, "granola-digest"), DIGEST_STUB)
+
+    def gemini_notes_calls_made(self):
+        if not os.path.exists(self.gemini_notes_calls):
+            return []
+        with open(self.gemini_notes_calls) as f:
+            return f.read().splitlines()
 
     def run_refresh(self, *args, **env):
         return subprocess.run(("bash", self.refresh) + args, env=self.env(**env),

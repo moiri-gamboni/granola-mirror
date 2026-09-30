@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # refresh.sh — keep a Granola notes mirror current, then derive what's new from it.
 #   1. incremental summaries (public API key)   2. transcripts (OAuth MCP, missing only)
-#   3. with --digest: granola-digest, if one is on PATH — an optional brief from a separate
+#   3. when GEMINI_RCLONE_REMOTE is set: mirror Google Meet notes and transcripts
+#   4. with --digest: granola-digest, if one is on PATH — an optional brief from a separate
 #      tool, over everything accumulated since the last brief
-#   4. notes.sh — a structured meeting note per transcript, via the meetings skill
+#   5. notes.sh — a structured meeting note per transcript, via the meetings skill
 # The fetch steps are idempotent and only touch new/changed notes, so a frequent cadence
 # stays well under the MCP transcript rate limit: the cron runs this hourly so a note lands
 # shortly after its transcript does; a deployment with a digest command adds a daily
@@ -15,8 +16,8 @@
 # One blocking lock (~/.locks/granola-pipeline) owns the whole run: every trigger source
 # (cron tick, webhook kick, a manual run) serializes on it, so two runs never interleave a
 # fetch and a note-write. refresh.sh acquires it, exports GRANOLA_LOCK_HELD=1 so the notes.sh
-# it invokes doesn't re-acquire, and holds it across summaries -> transcripts -> digest ->
-# notes -> commit. A wait longer than 3h is the only thing that pages as "lock timeout"
+# it invokes doesn't re-acquire, and holds it across summaries -> transcripts -> Gemini ->
+# digest -> notes -> commit. A wait longer than 3h is the only thing that pages as "lock timeout"
 # (rc 75); every other failure is that step's own signal. (Soft spot, documented not
 # guarded: a debug shell exporting GRANOLA_LOCK_HELD disables the notes.sh self-lock; the
 # residual is duplicated model spend on one note under mktemp+atomic-write, never data loss.)
@@ -44,6 +45,12 @@ done
 DIR=""
 [ ${#ARGS[@]} -gt 0 ] && DIR="${ARGS[0]}"
 DIR="${DIR:-${GRANOLA_MIRROR:-}}"
+# Preserve the environment value before the env file may be sourced to resolve DIR, so the
+# environment keeps precedence over the deployment file.
+GEMINI_REMOTE="${GEMINI_RCLONE_REMOTE:-}"
+if [ -z "$GEMINI_REMOTE" ] && [ -f "$HOME/.config/granola/env" ]; then
+  GEMINI_REMOTE="$(sed -n 's/^GEMINI_RCLONE_REMOTE=//p' "$HOME/.config/granola/env" | tail -n 1)"
+fi
 # Per-deployment constants file: ~/.config/granola/env (KEY=VALUE, shell-sourceable)
 # supplies GRANOLA_MIRROR when neither the argument nor the environment does, so
 # schedulers can invoke this script with no deployment-specific path at all.
@@ -99,7 +106,7 @@ disarm() { rm -f "$STATE/granola-alert-$1"; }
 # untouched. In a polyrepo layout workflows/ can be its own repo — the tiers are committed
 # in whichever repo they actually live.
 commit_mirror() {
-  local repo updates auto autorepo g
+  local repo updates auto autorepo g geminidir gemnotes
   # rev-parse is expected to fail when the mirror isn't in a repo — a supported setup
   if ! repo=$(git -C "$DIR" rev-parse --show-toplevel 2>/dev/null); then
     echo "  $DIR is not inside a git repo — skipping commit"
@@ -124,8 +131,12 @@ commit_mirror() {
   # -not_<id> granola basename scopes the pathspec so a half-drafted session note
   # is never swept into a cron commit. Quoted: git expands the glob, not the shell.
   local autonotes; autonotes="$WS/meetings/notes/*-not_*.note.md"
+  geminidir="$WS/meetings/gemini"
+  gemnotes="$WS/meetings/notes/*-gem_*.note.md"
   [ -d "$updates" ] && [ -n "$(git -C "$repo" status --porcelain -- "$updates")" ] && paths+=("$updates")
   [ -n "$(git -C "$repo" status --porcelain -- "$autonotes" 2>/dev/null)" ] && paths+=("$autonotes")
+  [ -n "$(git -C "$repo" status --porcelain -- "$geminidir" 2>/dev/null)" ] && paths+=("$geminidir")
+  [ -n "$(git -C "$repo" status --porcelain -- "$gemnotes" 2>/dev/null)" ] && paths+=("$gemnotes")
   [ "$autorepo" = "$repo" ] && paths+=("${gloss[@]}")
   if [ -n "$(git -C "$repo" status --porcelain -- "${paths[@]}")" ]; then
     git -C "$repo" add -- "${paths[@]}"
@@ -251,6 +262,43 @@ pipeline() {
     echo "[$(date -Is)]   MCP token expired — re-auth needed (ntfy sent)."
   else
     echo "[$(date -Is)]   transcript step failed (rc=$rc)."
+  fi
+
+  # Google Meet notes are optional until a Drive remote is configured. Keep this before the
+  # digest so the optional brief sees the same run's Gemini updates as the notes generator.
+  local remote="$GEMINI_REMOTE"
+  if [ -n "$remote" ]; then
+    local gemini_stderr_file gemini_stderr gemini_rc gemini_first gemini_doc_ids gemini_meet_line
+    mkdir -p "$WS/meetings/gemini"
+    echo "[$(date -Is)] granola-refresh: Gemini notes"
+    gemini_stderr_file="$(mktemp "$STATE/granola-gemini-stderr.XXXXXX")"
+    "$SELF_DIR/gemini-notes" sync "$WS/meetings/gemini" --remote "$remote" 2>"$gemini_stderr_file"
+    gemini_rc=$?
+    cat "$gemini_stderr_file" >&2
+    gemini_stderr="$(cat "$gemini_stderr_file")"
+    rm -f "$gemini_stderr_file"
+
+    if [ "$gemini_rc" -eq 1 ]; then
+      gemini_first="${gemini_stderr%%$'\n'*}"
+      alert_once gemini high "Gemini notes fetch failed" \
+        "$gemini_first; see journalctl -t granola-refresh"
+    elif [ "$gemini_rc" -eq 0 ] || [ "$gemini_rc" -eq 2 ]; then
+      disarm gemini
+    fi
+
+    gemini_doc_ids="$(printf '%s\n' "$gemini_stderr" | sed -n 's/^gemini-notes: export failed \([^:]*\):.*/\1/p' | paste -sd' ' -)"
+    if [ -n "$gemini_doc_ids" ]; then
+      alert_once gemini-docs high "Gemini notes: some docs failed" "$gemini_doc_ids"
+    else
+      disarm gemini-docs
+    fi
+
+    gemini_meet_line="$(printf '%s\n' "$gemini_stderr" | sed -n '/^gemini-notes: meet failed/p' | sed -n '1p')"
+    if [ -n "$gemini_meet_line" ]; then
+      alert_once gemini-meet high "Gemini notes: Meet transcripts failed" "$gemini_meet_line"
+    else
+      disarm gemini-meet
+    fi
   fi
 
   # Optional digest command, if one is on PATH; daily (--digest) only, and before the
