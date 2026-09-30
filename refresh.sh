@@ -26,7 +26,8 @@
 # never started (no run summary), a run where every attempted generation failed (carrying
 # the first error verbatim), a single meeting wedged while others succeed, a held
 # (unverifiable-banner) note, a failed digest, the lock timeout, and the MCP OAuth expiry
-# (granola-transcripts exit 3).
+# (granola-transcripts exit 3), plus the three Gemini fetch alarms (Drive query, doc export,
+# and Meet transcript failures).
 #
 #   refresh.sh [--commit] [--digest] <mirror-dir>        (or set GRANOLA_MIRROR)
 set -uo pipefail
@@ -100,11 +101,12 @@ alert_once() {
 }
 disarm() { rm -f "$STATE/granola-alert-$1"; }
 
-# Commit just the mirror + any digest output under updates/granola/ + the auto meeting notes
-# + both glossary tiers (notes.sh appends proposals to the auto tier and moves promoted rows
-# into the reviewed one). Pathspec commits, so anything else already staged is left
-# untouched. In a polyrepo layout workflows/ can be its own repo — the tiers are committed
-# in whichever repo they actually live.
+# Commit just the Granola mirror (`$DIR`) + Gemini mirror (`meetings/gemini/`) + any digest
+# output under updates/granola/ + generated notes (`-not_` and `-gem_` basenames) + both
+# glossary tiers (notes.sh appends proposals to the auto tier and moves promoted rows into
+# the reviewed one). Pathspec commits leave anything else already staged untouched. In a
+# polyrepo layout workflows/ can be its own repo — the tiers are committed in whichever repo
+# they actually live.
 commit_mirror() {
   local repo updates auto autorepo g geminidir gemnotes
   # rev-parse is expected to fail when the mirror isn't in a repo — a supported setup
@@ -127,8 +129,8 @@ commit_mirror() {
   local paths=("$DIR")
   # only include optional paths that actually have changes — a pathspec matching
   # nothing known to git makes `git commit -- <paths>` fail outright
-  # The auto notes live alongside session-written ones in meetings/notes/; the
-  # -not_<id> granola basename scopes the pathspec so a half-drafted session note
+  # The auto notes live alongside session-written ones in meetings/notes/; the generated
+  # basenames (`-not_<id>`, `-gem_<id>`) scope the pathspecs so a half-drafted session note
   # is never swept into a cron commit. Quoted: git expands the glob, not the shell.
   local autonotes; autonotes="$WS/meetings/notes/*-not_*.note.md"
   geminidir="$WS/meetings/gemini"
@@ -264,8 +266,7 @@ pipeline() {
     echo "[$(date -Is)]   transcript step failed (rc=$rc)."
   fi
 
-  # Google Meet notes are optional until a Drive remote is configured. Keep this before the
-  # digest so the optional brief sees the same run's Gemini updates as the notes generator.
+  # Google Meet notes are optional until a Drive remote is configured.
   local remote="$GEMINI_REMOTE"
   if [ -n "$remote" ]; then
     local gemini_stderr_file gemini_stderr gemini_rc gemini_first gemini_doc_ids gemini_meet_line

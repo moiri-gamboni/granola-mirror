@@ -14,6 +14,7 @@ import http.client
 import os
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import unittest
@@ -184,6 +185,11 @@ class RunnerArgv(unittest.TestCase):
         self.assertNotIn("granola-refresh\"", wr.RUNNER)  # the dropped caller-side flock target
 
     def test_kick_passes_refresh_and_mirror_positionally(self):
+        state = tempfile.TemporaryDirectory()
+        self.addCleanup(state.cleanup)
+        for name in ("PENDING", "MIRROR"):
+            self.addCleanup(setattr, wr, name, getattr(wr, name))
+        wr.PENDING = os.path.join(state.name, "granola-webhook-pending")
         wr.MIRROR = wr.MIRROR or "/tmp/mirror"
         captured = {}
 
