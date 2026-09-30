@@ -34,6 +34,7 @@ printf '%s\n' "called" >> "$CLAUDE_CALLS"
 for a in "$@"; do printf '%s\0' "$a"; done >> "$CLAUDE_ARGV"
 printf '\036' >> "$CLAUDE_ARGV"
 input="$(cat)"
+printf '%s\036' "$input" >> "$CLAUDE_INPUTS"
 case "${CLAUDE_STUB_MODE:-ok}" in
   fail)    printf 'boom: %s\n' "${CLAUDE_STUB_ERR:-stub failure}" >&2; exit 1 ;;
   empty)   exit 0 ;;
@@ -160,6 +161,7 @@ class GranolaSandbox(unittest.TestCase):
         write_exec(os.path.join(self.bin, "curl"), CURL_STUB)
         self.claude_calls = os.path.join(self.tmp, "claude-calls")
         self.claude_argv = os.path.join(self.tmp, "claude-argv")
+        self.claude_inputs = os.path.join(self.tmp, "claude-inputs")
         self.ntfy_log = os.path.join(self.tmp, "ntfy")
 
     # --- env / invocation -------------------------------------------------
@@ -169,6 +171,7 @@ class GranolaSandbox(unittest.TestCase):
                  PATH=self.bin + os.pathsep + os.environ["PATH"],
                  CLAUDE_CALLS=self.claude_calls,
                  CLAUDE_ARGV=self.claude_argv,
+                 CLAUDE_INPUTS=self.claude_inputs,
                  SANDBOX_NTFY_LOG=self.ntfy_log)
         e.pop("GRANOLA_LOCK_HELD", None)
         e.update(over)
@@ -217,7 +220,7 @@ class GranolaSandbox(unittest.TestCase):
     # --- fixtures ---------------------------------------------------------
     def mirror_file(self, name, updated="2026-08-19T10:00:00Z", summary="A real summary.",
                     transcript="Alice: hello there.  Bob: hi Alice.", tmark="__match__",
-                    header_line=True):
+                    header_line=True, event=None):
         """Write one mirror .md. tmark '__match__' stamps the transcript with `updated`
         (coherent); None omits the marker (grandfathered); any string stamps that literal.
         summary=None uses granola's no-summary placeholder (unsettled). transcript=None omits
@@ -227,8 +230,10 @@ class GranolaSandbox(unittest.TestCase):
         if header_line:
             lines.append("<!-- granola updated_at: %s -->" % updated)
         lines += ["# %s" % name.rsplit(".", 1)[0], "",
-                  "- **Date:** %s" % updated[:10], "",
-                  summary if summary is not None else "_(no summary)_"]
+                  "- **Date:** %s" % updated[:10]]
+        if event:
+            lines.append("- **Calendar event:** %s" % event)
+        lines += ["", summary if summary is not None else "_(no summary)_"]
         if transcript is not None:
             lines += ["", "## Transcript", ""]
             if tmark is not None:
@@ -306,6 +311,16 @@ class GranolaSandbox(unittest.TestCase):
         if parts and parts[-1] == b"":      # every arg is followed by \0 -> trailing empty
             parts = parts[:-1]
         return [a.decode() for a in parts]
+
+    def last_claude_input(self):
+        """Stdin for the last stub call, for checking the capture block the model receives."""
+        if not os.path.exists(self.claude_inputs):
+            return None
+        with open(self.claude_inputs, "rb") as f:
+            inputs = f.read().split(b"\x1e")
+        if not inputs:
+            return None
+        return inputs[-2].decode() if inputs[-1] == b"" else inputs[-1].decode()
 
     def run_summary(self):
         p = os.path.join(self.state, "granola-notes-run.json")

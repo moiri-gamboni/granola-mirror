@@ -363,5 +363,316 @@ class WorkspaceLayout(GranolaSandbox):
         self.assertFalse(os.path.isdir(os.path.join(meetings, "meetings")))
 
 
+class GeminiNotes(GranolaSandbox):
+    GRANOLA = "2026-09-30-team-sync-not_aaa.md"
+    GEMINI = "2026-09-30-team-sync-gem_doc123.md"
+
+    def prompt(self):
+        argv = self.last_claude_argv()
+        self.assertIsNotNone(argv, "the generation call was never made")
+        return argv[-1]
+
+    def test_a_shared_event_id_generates_one_ordered_pair_and_records_the_gemini_version(self):
+        granola = self.mirror_file(self.GRANOLA, event="evt123")
+        gemini = self.gemini_file(self.GEMINI, event="evt123",
+                                  modified="2026-09-30T12:00:00.000Z")
+
+        r = self.notes_sh(self.mirror, *LOW)
+
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertEqual(self.claude_call_count(), 1, r.stdout)
+        call_input = self.last_claude_input()
+        self.assertLess(call_input.index("capture 1 of 2: Granola"),
+                        call_input.index("capture 2 of 2: Google Meet notes doc"))
+        self.assertIn("Alice: hello there.", call_input)
+        self.assertIn("Alice Example:** Hello Bob.", call_input)
+        self.assertIn(self.read(granola), call_input)
+        self.assertIn(self.read(gemini).rstrip("\n"), call_input)
+        prompt = self.prompt().lower()
+        self.assertNotIn("capture 2 has no transcript", prompt)
+        self.assertIn("for this meeting:", prompt)
+        self.assertIn("meeting block described below", prompt)
+        note = self.read(self.note_path(self.GRANOLA))
+        self.assertIn("gemini-updated-at: 2026-09-30T12:00:00.000Z", note)
+        self.assertIn("1 paired", r.stdout)
+
+    def test_a_notes_only_gemini_partner_is_identified_as_having_no_transcript(self):
+        self.mirror_file(self.GRANOLA, event="evt123")
+        self.gemini_file(self.GEMINI, event="evt123", transcript=False)
+
+        r = self.notes_sh(self.mirror, *LOW)
+
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertEqual(self.claude_call_count(), 1, r.stdout)
+        self.assertIn("capture 2 has no transcript", self.prompt().lower())
+
+    def test_a_nonempty_meet_section_replaces_the_document_transcript_tab(self):
+        self.mirror_file(self.GRANOLA, event="evt123")
+        self.gemini_file(self.GEMINI, event="evt123", transcript=True,
+                         meet_lines=["[00:00:30] **Mira Example:** Meet recognition text."])
+
+        r = self.notes_sh(self.mirror, *LOW)
+
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertEqual(self.claude_call_count(), 1, r.stdout)
+        call_input = self.last_claude_input()
+        self.assertIn("conferenceRecords/rec1/transcripts/t1", call_input)
+        self.assertIn("[00:00:30] **Mira Example:** Meet recognition text.", call_input)
+        self.assertNotIn("**Alice Example:** Hello Bob.", call_input)
+        prompt = self.prompt().lower()
+        self.assertIn("for this meeting:", prompt)
+        self.assertIn("unedited speech recognition", prompt)
+        self.assertIn("elapsed", prompt)
+        self.assertIn("granola's timestamps", prompt)
+
+    def test_a_gemini_version_change_regenerates_the_paired_note(self):
+        self.mirror_file(self.GRANOLA, event="evt123")
+        self.gemini_file(self.GEMINI, event="evt123", modified="2026-09-30T12:00:00.000Z")
+        self.notes_sh(self.mirror, *LOW)
+        before = self.claude_call_count()
+        same = self.notes_sh(self.mirror, *LOW)
+        self.assertEqual(self.claude_call_count(), before, same.stdout)
+        self.assertEqual(self.run_summary()["current"], 1, same.stdout)
+        self.gemini_file(self.GEMINI, event="evt123", modified="2026-09-30T13:00:00.000Z")
+
+        r = self.notes_sh(self.mirror, *LOW)
+
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertEqual(self.claude_call_count(), before + 1, r.stdout)
+        self.assertIn("gemini-updated-at: 2026-09-30T13:00:00.000Z",
+                      self.read(self.note_path(self.GRANOLA)))
+
+    def test_partner_versions_and_capture_blocks_follow_filename_order(self):
+        self.mirror_file(self.GRANOLA, event="evt123")
+        later_name = "2026-09-30-z-team-gem_bbb.md"
+        earlier_name = "2026-09-30-a-team-gem_aaa.md"
+        self.gemini_file(later_name, event="evt123", modified="2026-09-30T13:00:00.000Z")
+        self.gemini_file(earlier_name, event="evt123", modified="2026-09-30T12:00:00.000Z")
+
+        r = self.notes_sh(self.mirror, *LOW)
+
+        self.assertEqual(r.returncode, 0, r.stdout)
+        call_input = self.last_claude_input()
+        self.assertLess(call_input.index("/aaa/edit"), call_input.index("/bbb/edit"))
+        self.assertIn("gemini-updated-at: 2026-09-30T12:00:00.000Z,2026-09-30T13:00:00.000Z",
+                      self.read(self.note_path(self.GRANOLA)))
+
+    def test_different_event_ids_do_not_pair_on_date_or_title(self):
+        self.mirror_file(self.GRANOLA, event="evt123")
+        self.gemini_file(self.GEMINI, event="evt456")
+
+        r = self.notes_sh(self.mirror, *LOW)
+
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertEqual(self.claude_call_count(), 2, r.stdout)
+        self.assertTrue(os.path.exists(self.note_path(self.GRANOLA)))
+        self.assertTrue(os.path.exists(self.note_path(self.GEMINI)))
+        self.assertNotIn("gemini-updated-at:", self.read(self.note_path(self.GRANOLA)))
+
+    def test_a_granola_note_without_a_partner_remains_current_without_a_gemini_key(self):
+        self.mirror_file(self.GRANOLA)
+        self.notes_sh(self.mirror, *LOW)
+        note = self.read(self.note_path(self.GRANOLA))
+        self.assertNotIn("gemini-updated-at:", note)
+        before = self.claude_call_count()
+
+        r = self.notes_sh(self.mirror, *LOW)
+
+        self.assertEqual(self.claude_call_count(), before, r.stdout)
+        self.assertEqual(self.run_summary()["current"], 1)
+
+    def test_an_absent_gemini_mirror_does_not_regenerate_a_paired_note(self):
+        self.mirror_file(self.GRANOLA, event="evt123")
+        self.gemini_file(self.GEMINI, event="evt123")
+        self.notes_sh(self.mirror, *LOW)
+        gemini_dir = os.path.join(self.ws, "meetings", "gemini")
+        os.unlink(os.path.join(gemini_dir, self.GEMINI))
+        os.rmdir(gemini_dir)
+        before = self.claude_call_count()
+
+        r = self.notes_sh(self.mirror, *LOW)
+
+        self.assertEqual(self.claude_call_count(), before, r.stdout)
+        self.assertEqual(self.run_summary()["current"], 1)
+
+    def test_an_unclaimed_gemini_transcript_gets_its_own_note(self):
+        self.gemini_file(self.GEMINI, event=None, transcript=True)
+
+        r = self.notes_sh(self.mirror, *LOW)
+
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertEqual(self.claude_call_count(), 1, r.stdout)
+        self.assertTrue(os.path.exists(self.note_path(self.GEMINI)))
+        self.assertIn("from gemini/" + self.GEMINI, self.read(self.note_path(self.GEMINI)))
+        prompt = self.prompt().lower()
+        self.assertNotIn("no transcript exists", prompt)
+        self.assertIn("for this meeting:", prompt)
+
+    def test_a_gemini_only_meet_transcript_is_used_without_a_granola_claim(self):
+        self.gemini_file(self.GEMINI, event=None, transcript=True,
+                         meet_lines=["[00:00:30] **Mira Example:** Meet recognition text."])
+
+        r = self.notes_sh(self.mirror, *LOW)
+
+        self.assertEqual(r.returncode, 0, r.stdout)
+        call_input = self.last_claude_input()
+        self.assertIn("[00:00:30] **Mira Example:** Meet recognition text.", call_input)
+        self.assertNotIn("**Alice Example:** Hello Bob.", call_input)
+        prompt = self.prompt().lower()
+        self.assertIn("no granola transcript to line it up with", prompt)
+        self.assertNotIn("granola's timestamps", prompt)
+
+    def test_an_unclaimed_notes_only_gemini_doc_is_noted_as_unverified(self):
+        self.gemini_file(self.GEMINI, event=None, transcript=False)
+
+        r = self.notes_sh(self.mirror, *LOW)
+
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertTrue(os.path.exists(self.note_path(self.GEMINI)))
+        prompt = self.prompt().lower()
+        self.assertIn("no transcript exists", prompt)
+        self.assertIn("unverified ai notes", prompt)
+        self.assertIn("at most med confidence", prompt)
+
+    def test_an_empty_meet_capture_without_a_granola_twin_is_skipped(self):
+        gemini = self.gemini_file(self.GEMINI, event=None, transcript=False, meet_lines=[])
+        with open(gemini, "a") as f:
+            f.write("\n## Meet transcript\n\n"
+                    "<!-- meet transcript: conferenceRecords/rec2/transcripts/t2 -->\n")
+
+        r = self.notes_sh(self.mirror, *LOW)
+
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertEqual(self.claude_call_count(), 0, r.stdout)
+        self.assertFalse(os.path.exists(self.note_path(self.GEMINI)))
+
+        explicit = self.notes_sh(self.mirror, gemini, *LOW)
+
+        self.assertEqual(explicit.returncode, 0, explicit.stdout)
+        self.assertEqual(self.claude_call_count(), 0, explicit.stdout)
+        self.assertFalse(os.path.exists(self.note_path(self.GEMINI)))
+
+    def test_an_empty_meet_capture_is_ignored_when_pairing_a_real_doc_and_keeps_its_old_note(self):
+        import hashlib
+
+        self.mirror_file(self.GRANOLA, event="evt123")
+        real_name = "2026-09-30-team-sync-gem_real123.md"
+        empty_name = "2026-09-30-team-sync-gem_empty123.md"
+        real = self.gemini_file(real_name, event="evt123",
+                                modified="2026-09-30T13:00:00.000Z")
+        empty = self.gemini_file(empty_name, event="evt123",
+                                 modified="2026-09-30T12:00:00.000Z",
+                                 transcript=False, meet_lines=[])
+        body = "# Existing Gemini note\n\nKept as-is.\n"
+        bodyhash = hashlib.sha256(body.encode()).hexdigest()
+        old_note = self.write_note(
+            empty_name,
+            "<!-- auto-generated 2026-09-30 by granola-mirror/notes.sh "
+            "from gemini/%s — source-updated-at: 2026-09-30T12:00:00.000Z "
+            "body-sha256: %s — unattended extraction -->" % (empty_name, bodyhash),
+            body=body,
+        )
+        old_note_bytes = self.read(old_note)
+
+        r = self.notes_sh(self.mirror, *LOW)
+
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertEqual(self.claude_call_count(), 1, r.stdout)
+        call_input = self.last_claude_input()
+        self.assertIn(self.read(real).rstrip("\n"), call_input)
+        self.assertNotIn("/empty123/edit", call_input)
+        self.assertIn("capture 2 of 2: Google Meet notes doc", call_input)
+        pair_note = self.read(self.note_path(self.GRANOLA))
+        self.assertIn("gemini-updated-at: 2026-09-30T13:00:00.000Z", pair_note)
+        self.assertNotIn("2026-09-30T12:00:00.000Z", pair_note)
+        self.assertEqual(self.read(old_note), old_note_bytes)
+        self.assertTrue(os.path.exists(empty), "the empty capture source must remain untouched")
+
+    def test_a_granola_file_without_a_transcript_does_not_claim_its_gemini_partner(self):
+        self.mirror_file(self.GRANOLA, event="evt123", transcript=None)
+        self.gemini_file(self.GEMINI, event="evt123", transcript=False)
+
+        r = self.notes_sh(self.mirror, *LOW)
+
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertEqual(self.claude_call_count(), 1, r.stdout)
+        self.assertTrue(os.path.exists(self.note_path(self.GEMINI)))
+        self.assertFalse(os.path.exists(self.note_path(self.GRANOLA)))
+
+    def test_a_transcribed_granola_twin_replaces_an_unedited_gemini_only_note(self):
+        gemini = self.gemini_file(self.GEMINI, event="evt123")
+        self.notes_sh(self.mirror, *LOW)
+        gemini_note = self.note_path(self.GEMINI)
+        self.assertTrue(os.path.exists(gemini_note))
+        granola = self.mirror_file(self.GRANOLA, event="evt123")
+
+        r = self.notes_sh(self.mirror, *LOW)
+
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertTrue(os.path.exists(self.note_path(self.GRANOLA)))
+        self.assertFalse(os.path.exists(gemini_note), "verified generated note should be superseded")
+        self.assertIn("1 superseded", r.stdout)
+        self.assertIn(self.read(granola), self.last_claude_input())
+
+    def test_a_hand_edited_gemini_only_note_is_kept_and_counted_when_a_pair_arrives(self):
+        self.gemini_file(self.GEMINI, event="evt123")
+        self.notes_sh(self.mirror, *LOW)
+        gemini_note = self.note_path(self.GEMINI)
+        with open(gemini_note, "a") as f:
+            f.write("\nHand edit.\n")
+        self.mirror_file(self.GRANOLA, event="evt123")
+
+        r = self.notes_sh(self.mirror, *LOW)
+
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertTrue(os.path.exists(gemini_note))
+        self.assertIn("Hand edit.", self.read(gemini_note))
+        self.assertTrue(os.path.exists(self.note_path(self.GRANOLA)))
+        self.assertEqual(self.run_summary()["held_edited"], 1)
+        self.assertIn("1 edited", r.stdout)
+
+    def test_an_unparseable_gemini_only_banner_is_kept_and_held_when_a_pair_arrives(self):
+        self.gemini_file(self.GEMINI, event="evt123")
+        gemini_note = self.write_note(self.GEMINI, "<!-- legacy note -->")
+        self.mirror_file(self.GRANOLA, event="evt123")
+
+        r = self.notes_sh(self.mirror, *LOW)
+
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertTrue(os.path.exists(gemini_note))
+        self.assertEqual(self.run_summary()["held_unparseable"], 1)
+        self.assertTrue(self.held_marker(self.GEMINI))
+
+    def test_explicitly_naming_a_claimed_gemini_file_exits_two_with_its_granola_twin(self):
+        self.mirror_file(self.GRANOLA, event="evt123")
+        gemini = self.gemini_file(self.GEMINI, event="evt123")
+
+        r = self.notes_sh(self.mirror, gemini)
+
+        self.assertEqual(r.returncode, 2, r.stdout)
+        self.assertIn(self.GRANOLA, r.stdout)
+        self.assertEqual(self.claude_call_count(), 0, r.stdout)
+
+    def test_explicitly_naming_an_unclaimed_pre_floor_gemini_file_bypasses_the_floor(self):
+        name = "2026-07-16-team-sync-gem_old123.md"
+        gemini = self.gemini_file(name, event=None)
+
+        r = self.notes_sh(self.mirror, gemini, "--since", "2026-08-19")
+
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertEqual(self.claude_call_count(), 1, r.stdout)
+        self.assertTrue(os.path.exists(self.note_path(name)))
+
+    def test_an_unclaimed_pre_floor_gemini_file_is_skipped_without_an_explicit_file(self):
+        name = "2026-07-16-team-sync-gem_old123.md"
+        self.gemini_file(name, event=None)
+
+        r = self.notes_sh(self.mirror, "--since", "2026-08-19")
+
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertEqual(self.claude_call_count(), 0, r.stdout)
+        self.assertFalse(os.path.exists(self.note_path(name)))
+
+
 if __name__ == "__main__":
     unittest.main()
