@@ -267,13 +267,12 @@ pipeline() {
   fi
 
   # Google Meet notes are optional until a Drive remote is configured.
-  local remote="$GEMINI_REMOTE"
-  if [ -n "$remote" ]; then
+  if [ -n "$GEMINI_REMOTE" ]; then
     local gemini_stderr_file gemini_stderr gemini_rc gemini_first gemini_doc_ids gemini_meet_line
     mkdir -p "$WS/meetings/gemini"
     echo "[$(date -Is)] granola-refresh: Gemini notes"
     gemini_stderr_file="$(mktemp "$STATE/granola-gemini-stderr.XXXXXX")"
-    "$SELF_DIR/gemini-notes" sync "$WS/meetings/gemini" --remote "$remote" 2>"$gemini_stderr_file"
+    "$SELF_DIR/gemini-notes" sync "$WS/meetings/gemini" --remote "$GEMINI_REMOTE" 2>"$gemini_stderr_file"
     gemini_rc=$?
     cat "$gemini_stderr_file" >&2
     gemini_stderr="$(cat "$gemini_stderr_file")"
@@ -293,7 +292,7 @@ pipeline() {
         disarm gemini-docs
       fi
 
-      gemini_meet_line="$(printf '%s\n' "$gemini_stderr" | sed -n '/^gemini-notes: meet failed/p' | sed -n '1p')"
+      gemini_meet_line="$(printf '%s\n' "$gemini_stderr" | sed -n '/^gemini-notes: meet failed/{p;q}')"
       if [ -n "$gemini_meet_line" ]; then
         alert_once gemini-meet high "Gemini notes: Meet transcripts failed" "$gemini_meet_line"
       else
