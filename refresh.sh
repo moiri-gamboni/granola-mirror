@@ -25,7 +25,8 @@
 # refresh.sh owns ALL push alarms (so a manual notes.sh never pages): a notes step that
 # never started (no run summary), a run where every attempted generation failed (carrying
 # the first error verbatim), a single meeting wedged while others succeed, a held
-# (unverifiable-banner) note, a failed digest, the lock timeout, and the MCP OAuth expiry
+# (unverifiable-banner) note, a failed summaries sync (its last error line), a failed digest,
+# the lock timeout, and the MCP OAuth expiry
 # (granola-transcripts exit 3), plus the three Gemini fetch alarms (Drive query, doc export,
 # and Meet transcript failures).
 #
@@ -242,8 +243,19 @@ PY
 
 pipeline() {
   echo "[$(date -Is)] granola-refresh: summaries -> $DIR"
-  "$SELF_DIR/granola" sync "$DIR" --changed-file "$CHANGED"; local src=$?
-  [ "$src" -eq 0 ] || echo "[$(date -Is)]   summaries fetch failed (rc=$src)."
+  local sum_stderr_file sum_last
+  sum_stderr_file="$(mktemp "$STATE/granola-summaries-stderr.XXXXXX")"
+  "$SELF_DIR/granola" sync "$DIR" --changed-file "$CHANGED" 2>"$sum_stderr_file"; local src=$?
+  cat "$sum_stderr_file" >&2
+  sum_last="$(sed '/^[[:space:]]*$/d' "$sum_stderr_file" | tail -n 1)"
+  rm -f "$sum_stderr_file"
+  if [ "$src" -eq 0 ]; then
+    disarm summaries
+  else
+    echo "[$(date -Is)]   summaries fetch failed (rc=$src)."
+    [ -n "$sum_last" ] || sum_last="exit $src"
+    alert_once summaries high "Granola summaries failed" "$sum_last; see journalctl -t granola-refresh"
+  fi
   # Accumulate for the daily digest: each tick's changed list is appended (deduped)
   # and only a successful --digest run clears it, so frequent ticks can't starve the brief.
   if [ -s "$CHANGED" ]; then

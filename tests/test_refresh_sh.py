@@ -243,6 +243,31 @@ class OAuthAlarm(RefreshSandbox):
         self.assertTrue(any("re-auth" in c.lower() for c in self.ntfy_calls()), r.stdout)
 
 
+class SummariesAlarm(RefreshSandbox):
+    def pages(self):
+        return [c for c in self.ntfy_calls() if "Title: Granola summaries failed" in c]
+
+    def test_a_failed_summaries_sync_pages_once_with_its_last_error_and_rearms_on_success(self):
+        self.mirror_file("2026-08-19-standup-not_aaa.md")
+        err = "granola: 404 on /notes/not_x: gone; trying the MCP\ngranola: listed but unreadable through the API and the MCP: not_x"
+        first = self.run_refresh(self.mirror, GRANOLA_SYNC_RC="1", GRANOLA_SYNC_STDERR=err)
+        self.assertEqual(first.returncode, 0, first.stdout)
+        self.assertIn(err, first.stdout, "the sync's stderr must stay in the refresh log")
+        self.assertIn("granola-refresh: notes", first.stdout, "a failed sync must not stop the pipeline")
+        pages = self.pages()
+        self.assertEqual(len(pages), 1, self.ntfy_calls())
+        self.assertIn("listed but unreadable through the API and the MCP: not_x", pages[0])
+        self.assertNotIn("trying the MCP", pages[0])
+
+        self.run_refresh(self.mirror, GRANOLA_SYNC_RC="1", GRANOLA_SYNC_STDERR=err)
+        self.assertEqual(len(self.pages()), 1, "a persistent failure pages once")
+        self.run_refresh(self.mirror)
+        self.run_refresh(self.mirror, GRANOLA_SYNC_RC="1", GRANOLA_SYNC_STDERR="")
+        pages = self.pages()
+        self.assertEqual(len(pages), 2, "a success re-arms the alarm")
+        self.assertIn("exit 1", pages[1])
+
+
 class GeminiRefresh(RefreshSandbox):
     def configure_env_file(self, text):
         cfg = os.path.join(self.home, ".config", "granola")

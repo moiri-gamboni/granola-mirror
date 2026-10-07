@@ -57,6 +57,7 @@ GRANOLA_STUB = '''#!/usr/bin/env bash
 cf=""
 while [ $# -gt 0 ]; do case "$1" in --changed-file) cf="$2"; shift 2;; *) shift;; esac; done
 [ -n "$cf" ] && : > "$cf"
+[ -n "${GRANOLA_SYNC_STDERR:-}" ] && printf '%s\n' "$GRANOLA_SYNC_STDERR" >&2
 exit "${GRANOLA_SYNC_RC:-0}"
 '''
 TRANSCRIPTS_STUB = '#!/usr/bin/env bash\nexit "${TRANSCRIPTS_RC:-0}"\n'
