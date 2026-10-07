@@ -7,6 +7,9 @@ transcript and append a '## Transcript' section to its mirror .md file.
 
   granola-transcripts sync DIR [--force]   enrich every *.md that lacks a current transcript
   granola-transcripts get <uuid>           print one transcript to stdout
+  granola-transcripts meeting <id>         print one meeting's uuid, url, participants and
+                                           AI summary as JSON (reads link-shared notes the
+                                           public API refuses; `granola sync` falls back to it)
   granola-transcripts reformat DIR         re-split fetched transcripts one turn per line
                                            (local, no MCP calls)
 
@@ -16,7 +19,7 @@ section, so the refresh order is:  granola sync DIR  &&  granola-transcripts syn
 Exit 3 means the OAuth refresh token has expired and a browser re-authorization is
 needed (outside this tool).
 """
-import sys, os, json, re, time, glob, base64, argparse
+import sys, os, json, re, time, glob, base64, html, argparse
 import urllib.request, urllib.parse, urllib.error
 
 CFG = os.path.expanduser("~/.config/granola")
@@ -113,13 +116,17 @@ def _mcp(body, tok):
 BAD = re.compile(r"rate limit|slow down|too many request", re.I)
 
 
-def transcript(uuid, tok):
+def _init(tok):
     if not _inited[0]:
         _mcp({"jsonrpc": "2.0", "id": 1, "method": "initialize",
               "params": {"protocolVersion": PROTO, "capabilities": {},
                          "clientInfo": {"name": "granola-transcripts", "version": "1"}}}, tok)
         _mcp({"jsonrpc": "2.0", "method": "notifications/initialized"}, tok)
         _inited[0] = True
+
+
+def transcript(uuid, tok):
+    _init(tok)
     for attempt in range(10):
         res = _mcp({"jsonrpc": "2.0", "id": 3, "method": "tools/call",
                     "params": {"name": "get_meeting_transcript", "arguments": {"meeting_id": uuid}}}, tok)
@@ -134,6 +141,39 @@ def transcript(uuid, tok):
         except Exception:
             return txt or None
     return None                                # still rate-limited after retries
+
+
+_MEETING_RE = re.compile(r'<meeting id="([^"]*)" title="([^"]*)"[^>]*? url="([^"]*)">')
+_PARTICIPANTS_RE = re.compile(r"<known_participants>(.*?)</known_participants>", re.S)
+_SUMMARY_RE = re.compile(r"<summary>\n?(.*?)</summary>", re.S)
+
+
+def meeting(note_id, tok):
+    """One meeting's metadata and AI summary through the MCP's get_meetings, which also
+    reads notes the public API refuses (shared by link). None when Granola reports the id
+    not found; exits 1 on any other unexpected answer."""
+    _init(tok)
+    res = _mcp({"jsonrpc": "2.0", "id": 4, "method": "tools/call",
+                "params": {"name": "get_meetings", "arguments": {"meeting_ids": [note_id]}}}, tok)
+    txt = "".join(c.get("text", "") for c in ((res or {}).get("result") or {}).get("content", [])
+                  if c.get("type") == "text")
+    m = _MEETING_RE.search(txt)
+    if not m:
+        try:
+            if note_id in json.loads(txt).get("not_found", []):
+                return None
+        except (ValueError, AttributeError):
+            pass
+        sys.exit(f"granola-transcripts: unexpected get_meetings answer for {note_id}: {json.dumps(res)[:300]}")
+    p = _PARTICIPANTS_RE.search(txt)
+    names = []
+    for part in html.unescape(p.group(1)).split(",") if p else []:
+        name = re.split(r" \(| from | <", part.strip(), maxsplit=1)[0].strip()
+        if name:
+            names.append(name)
+    sm = _SUMMARY_RE.search(txt)
+    return {"uuid": m.group(1), "title": html.unescape(m.group(2)), "url": m.group(3),
+            "participants": names, "summary": html.unescape(sm.group(1)).strip() if sm else ""}
 
 
 def cmd_sync(a):
@@ -176,6 +216,13 @@ def cmd_get(a):
     print(transcript(a.uuid, token()) or "(no transcript)")
 
 
+def cmd_meeting(a):
+    m = meeting(a.id, token())
+    if m is None:
+        sys.exit(f"granola-transcripts: {a.id} not found")
+    print(json.dumps(m))
+
+
 def cmd_reformat(a):
     """Re-split already-fetched transcripts one turn per line. Local only — no MCP
     calls, so it doesn't touch the transcript rate limit."""
@@ -198,6 +245,7 @@ p = argparse.ArgumentParser(prog="granola-transcripts", description=__doc__,
 sub = p.add_subparsers(dest="cmd", required=True)
 ps = sub.add_parser("sync"); ps.add_argument("dir"); ps.add_argument("--force", action="store_true"); ps.set_defaults(fn=cmd_sync)
 pg = sub.add_parser("get"); pg.add_argument("uuid"); pg.set_defaults(fn=cmd_get)
+pm = sub.add_parser("meeting"); pm.add_argument("id"); pm.set_defaults(fn=cmd_meeting)
 pr = sub.add_parser("reformat"); pr.add_argument("dir"); pr.set_defaults(fn=cmd_reformat)
 args = p.parse_args()
 args.fn(args)

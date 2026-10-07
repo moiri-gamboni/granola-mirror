@@ -14,7 +14,7 @@ you, and (with the Public scope) workspace / team-space notes.
                                            rewrites them), keeps any '## Transcript'
                                            section, writes the changed paths to PATH
 """
-import sys, os, json, re, time, argparse, urllib.request, urllib.parse, urllib.error
+import sys, os, json, re, time, argparse, subprocess, urllib.request, urllib.parse, urllib.error
 
 API = "https://public-api.granola.ai/v1"
 KEYFILE = os.path.expanduser("~/.config/granola/api-key")
@@ -30,7 +30,7 @@ def _key():
 _MIN_INTERVAL = 0.22   # ~4.5 req/s, under Granola's 5 req/s sustained cap (25 burst)
 _last = [0.0]
 
-def api(path, **params):
+def api(path, not_found_ok=False, **params):
     url = f"{API}{path}"
     q = {k: v for k, v in params.items() if v is not None}
     if q:
@@ -47,6 +47,9 @@ def api(path, **params):
             with urllib.request.urlopen(req, timeout=30) as r:
                 return json.load(r)
         except urllib.error.HTTPError as e:
+            if e.code == 404 and not_found_ok:
+                sys.stderr.write(f"granola: 404 on {path}: {e.read().decode()[:300]}; trying the MCP\n")
+                return None
             if e.code == 429 and attempt < 5:
                 ra = e.headers.get("Retry-After", "")
                 time.sleep(float(ra) if ra.replace(".", "", 1).isdigit() else 2 ** attempt)
@@ -115,10 +118,24 @@ def cmd_get(a):
     sys.stdout.write(note_markdown(note))
 
 
+def mcp_note(note):
+    """A note the public API lists but refuses to return (shared by link), rebuilt from
+    the MCP's get_meetings: the list's metadata plus the meeting URL, whose UUID is what
+    granola-transcripts fetches the transcript by. None when the MCP cannot read it either."""
+    tool = os.path.join(os.path.dirname(os.path.realpath(__file__)), "granola-transcripts")
+    r = subprocess.run((tool, "meeting", note["id"]), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    if r.returncode != 0:
+        sys.stderr.write(r.stderr)
+        return None
+    m = json.loads(r.stdout)
+    return dict(note, web_url=m["url"], attendees=[{"name": n} for n in m["participants"]],
+                summary_markdown=m["summary"] or None)
+
+
 def cmd_sync(a):
     os.makedirs(a.dir, exist_ok=True)
     written = skipped = 0
-    changed = []
+    changed, unreadable = [], []
     for note in paginate("/notes", "notes", folder_id=a.folder):
         if a.since and (note.get("created_at") or "")[:10] < a.since:
             continue
@@ -131,7 +148,10 @@ def cmd_sync(a):
             if m and m.group(1) == (note.get("updated_at") or ""):
                 skipped += 1
                 continue
-        full = api(f'/notes/{note["id"]}')
+        full = api(f'/notes/{note["id"]}', not_found_ok=True) or mcp_note(note)
+        if full is None:
+            unreadable.append(note["id"])
+            continue
         md = note_markdown(full).rstrip()
         # preserve a transcript section added by granola-transcripts
         idx = old.find("\n## Transcript\n")
@@ -144,6 +164,8 @@ def cmd_sync(a):
         with open(a.changed_file, "w") as fh:
             fh.write("".join(p + "\n" for p in changed))
     print(f"granola: {written} written, {skipped} unchanged -> {a.dir}")
+    if unreadable:
+        sys.exit(f"granola: listed but unreadable through the API and the MCP: {' '.join(unreadable)}")
 
 
 p = argparse.ArgumentParser(prog="granola", description=__doc__,

@@ -139,6 +139,7 @@ def _urlopen(req, data=None, timeout=None, **kw):
         raise urllib.error.HTTPError(req.full_url, route["status"], "stub", {}, io.BytesIO(raw))
     resp = io.BytesIO(raw)
     resp.status = route["status"]
+    resp.headers = route.get("headers", {})
     return resp
 
 if os.environ.get("HTTP_STUB_ROUTES"):
