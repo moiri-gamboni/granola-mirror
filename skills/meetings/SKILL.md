@@ -86,6 +86,10 @@ Include only the sections that earn their place for this meeting's weight. For a
 - **Open:** <each with High/Med/Low + what would resolve it; say when the audio needs checking>
 ```
 
+## Markdown formatting
+
+Write each paragraph and each list item as one line and let the reader's viewer wrap it. Never break a line to fit a column width (80 characters or any other): hard wraps make diffs noisy and go stale on the first edit. A line break belongs only where markdown gives it meaning: between paragraphs, list items, headings and table rows, and inside code blocks.
+
 ## Privacy
 
 Transcripts carry personal data (emails, phone numbers, tokens). Never paste a secret's value (API token, password) into a note, even when the meetings tree is a private repository: record that a secret was shared, not the value.
