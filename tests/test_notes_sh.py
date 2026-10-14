@@ -11,7 +11,7 @@ import re
 import subprocess
 import unittest
 
-from _harness import GranolaSandbox
+from _harness import GranolaSandbox, write_exec
 
 LOW = ("--since", "2000-01-01")   # include the dated fixtures; the real floor is tested separately
 
@@ -330,6 +330,25 @@ class ToolDenial(GranolaSandbox):
         self.assertEqual(argv[argv.index("--tools") + 1], "", "--tools value must be empty")
         self.assertIn("--strict-mcp-config", argv)
         self.assertNotIn("--mcp-config", argv, "no MCP config may be passed")
+
+
+class UnattendedConfiguration(GranolaSandbox):
+    def test_the_generation_call_runs_safe_mode_on_sonnet_without_timeout_or_fallback(self):
+        """Safe mode keeps CLAUDE.md, hooks, plugins and memory out of the call; --bare would
+        force API-key auth, a fallback model would let another model write notes unannounced,
+        and a `timeout` wrapper would kill a long generation the box has decided to wait for."""
+        write_exec(os.path.join(self.bin, "timeout"), "#!/usr/bin/env bash\nexit 97\n")
+        self.mirror_file("2026-08-19-standup-not_aaa.md")
+        r = self.notes_sh(self.mirror, *LOW)
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertTrue(os.path.exists(self.note_path("2026-08-19-standup-not_aaa.md")), r.stdout)
+        argv = self.last_claude_argv()
+        for flag in ("--safe-mode", "--no-session-persistence"):
+            self.assertIn(flag, argv)
+        self.assertEqual(argv[argv.index("--model") + 1], "sonnet")
+        self.assertEqual(argv[argv.index("--effort") + 1], "xhigh")
+        for flag in ("--bare", "--fallback-model"):
+            self.assertNotIn(flag, argv)
 
 
 class WorkspaceLayout(GranolaSandbox):

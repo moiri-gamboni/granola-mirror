@@ -27,7 +27,10 @@
 # transcript content, so it runs with NO tools — `--tools ""` disables the built-in set and
 # `--strict-mcp-config` with no `--mcp-config` keeps the user's configured MCP servers from
 # loading. `--tools ""` alone would still leave the MCP tools reachable, so both flags are
-# required; together they close the prompt-injection egress path.
+# required; together they close the prompt-injection egress path. `--safe-mode` also loads
+# no CLAUDE.md, hooks, plugins, skills or auto-memory, so a note does not depend on the
+# directory the cron (HOME) or the webhook (/) starts from; unlike `--bare` it keeps the
+# subscription login, which is the only auth this call uses.
 #
 #   notes.sh DIR [FILE...] [--since YYYY-MM-DD] [--force]
 #   notes.sh --hash NOTEFILE     print the sha256 of a note's body (banner+blank stripped);
@@ -524,10 +527,13 @@ $GEMINI_RULES"
       echo "# The meeting: Granola header + AI summary (UNRELIABLE, lossy), then the verbatim transcript (source of truth)"
       cat "$f"
     fi
-  } | CLAUDE_CODE_MAX_OUTPUT_TOKENS=128000 timeout 3600 claude -p --model opus --effort medium \
-        --tools "" --strict-mcp-config "$unit_prompt" > "$tmp" 2>"$err"
-  # 128000 = the output cap of Opus 5.5, which `opus` resolves to; Claude Code's 64k default
+  } | CLAUDE_CODE_MAX_OUTPUT_TOKENS=128000 claude -p --safe-mode --no-session-persistence \
+        --model sonnet --effort xhigh --tools "" --strict-mcp-config "$unit_prompt" > "$tmp" 2>"$err"
+  # 128000 = the output cap of Sonnet 5.5, which `sonnet` resolves to; Claude Code's 64k default
   # is half that, and a long meeting can exceed it (thinking counts toward output tokens).
+  # The variable is still read under --safe-mode. No outer timeout and no fallback model: a
+  # hung call holds the pipeline lock until refresh.sh pages it as a lock timeout, and a model
+  # that cannot serve the call fails the generation like any other.
   rc=$?
   # A heading after the marker is note content in the wrong place: splitting there would
   # move it out of the note and into the auto tier with nothing alarming.
