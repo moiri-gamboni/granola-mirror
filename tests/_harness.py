@@ -35,6 +35,7 @@ for a in "$@"; do printf '%s\0' "$a"; done >> "$CLAUDE_ARGV"
 printf '\036' >> "$CLAUDE_ARGV"
 input="$(cat)"
 printf '%s\036' "$input" >> "$CLAUDE_INPUTS"
+env > "$CLAUDE_ENV"
 case "${CLAUDE_STUB_MODE:-ok}" in
   fail)    printf 'boom: %s\n' "${CLAUDE_STUB_ERR:-stub failure}" >&2; exit 1 ;;
   empty)   exit 0 ;;
@@ -174,6 +175,7 @@ class GranolaSandbox(unittest.TestCase):
         write_exec(os.path.join(self.bin, "curl"), CURL_STUB)
         self.claude_calls = os.path.join(self.tmp, "claude-calls")
         self.claude_argv = os.path.join(self.tmp, "claude-argv")
+        self.claude_env = os.path.join(self.tmp, "claude-env")
         self.claude_inputs = os.path.join(self.tmp, "claude-inputs")
         self.ntfy_log = os.path.join(self.tmp, "ntfy")
         self.gemini_notes_calls = os.path.join(self.tmp, "gemini-notes-calls")
@@ -185,6 +187,7 @@ class GranolaSandbox(unittest.TestCase):
                  PATH=self.bin + os.pathsep + os.environ["PATH"],
                  CLAUDE_CALLS=self.claude_calls,
                  CLAUDE_ARGV=self.claude_argv,
+                 CLAUDE_ENV=self.claude_env,
                  CLAUDE_INPUTS=self.claude_inputs,
                  SANDBOX_NTFY_LOG=self.ntfy_log,
                  GEMINI_NOTES_CALLS=self.gemini_notes_calls)
@@ -340,6 +343,11 @@ class GranolaSandbox(unittest.TestCase):
         if parts and parts[-1] == b"":      # every arg is followed by \0 -> trailing empty
             parts = parts[:-1]
         return [a.decode() for a in parts]
+
+    def last_claude_env(self):
+        """The environment of the last stub call, as a dict (the stub overwrites it per call)."""
+        with open(self.claude_env) as f:
+            return dict(line.rstrip("\n").split("=", 1) for line in f if "=" in line)
 
     def last_claude_input(self):
         """Stdin for the last stub call, for checking the capture block the model receives."""

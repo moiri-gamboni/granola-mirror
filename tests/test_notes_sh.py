@@ -350,6 +350,20 @@ class UnattendedConfiguration(GranolaSandbox):
         for flag in ("--bare", "--fallback-model"):
             self.assertNotIn(flag, argv)
 
+    def test_the_generation_call_sets_the_telemetry_opt_out_itself(self):
+        """The opt-out must not depend on `--safe-mode` applying the settings file. Each switch
+        is planted as "0" in the caller's environment, so the child reading 1 proves the call
+        sets it, whatever the runner's own environment holds."""
+        switches = ("DISABLE_TELEMETRY", "DISABLE_ERROR_REPORTING", "DO_NOT_TRACK",
+                    "CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY", "DISABLE_FEEDBACK_COMMAND")
+        self.mirror_file("2026-08-19-standup-not_aaa.md")
+        r = self.notes_sh(self.mirror, *LOW, **{name: "0" for name in switches})
+        self.assertEqual(r.returncode, 0, r.stdout)
+        child = self.last_claude_env()
+        for name in switches:
+            self.assertEqual(child.get(name), "1", name)
+        self.assertEqual(child.get("CLAUDE_CODE_MAX_OUTPUT_TOKENS"), "128000")
+
 
 class WorkspaceLayout(GranolaSandbox):
     def test_a_mirror_inside_a_git_workspace_resolves_notes_at_the_toplevel(self):

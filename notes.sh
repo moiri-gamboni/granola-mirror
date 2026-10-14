@@ -527,13 +527,19 @@ $GEMINI_RULES"
       echo "# The meeting: Granola header + AI summary (UNRELIABLE, lossy), then the verbatim transcript (source of truth)"
       cat "$f"
     fi
-  } | CLAUDE_CODE_MAX_OUTPUT_TOKENS=128000 claude -p --safe-mode --no-session-persistence \
+  } | DISABLE_TELEMETRY=1 DISABLE_ERROR_REPORTING=1 DO_NOT_TRACK=1 \
+        CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY=1 DISABLE_FEEDBACK_COMMAND=1 \
+        CLAUDE_CODE_MAX_OUTPUT_TOKENS=128000 claude -p --safe-mode --no-session-persistence \
         --model sonnet --effort xhigh --tools "" --strict-mcp-config "$unit_prompt" > "$tmp" 2>"$err"
   # 128000 = the output cap of Sonnet 5.5, which `sonnet` resolves to; Claude Code's 64k default
   # is half that, and a long meeting can exceed it (thinking counts toward output tokens).
   # The variable is still read under --safe-mode. No outer timeout and no fallback model: a
   # hung call holds the pipeline lock until refresh.sh pages it as a lock timeout, and a model
   # that cannot serve the call fails the generation like any other.
+  # DISABLE_TELEMETRY to DISABLE_FEEDBACK_COMMAND are the caller's telemetry opt-out, set on
+  # the call itself: `--safe-mode` disables "all customizations" and only happens to keep
+  # applying the settings file's `env` block, which its help text does not promise, so the
+  # opt-out must not depend on it.
   rc=$?
   # A heading after the marker is note content in the wrong place: splitting there would
   # move it out of the note and into the auto tier with nothing alarming.
